@@ -9,34 +9,34 @@ import numpy as np
 from scipy import stats
 import statsmodels.api as sm
 
-# -----------------------------
+# ---------------------------------------------------
 # FastAPI app setup
-# -----------------------------
-app = FastAPI(title="AI Data Lab Stats Engine", version="0.1.0")
+# ---------------------------------------------------
+app = FastAPI(title="AI Data Lab Stats Engine", version="0.2.0")
 
-# Allow CORS for local dev + Lovable/Render frontends
+# CORS so Lovable (browser frontend) can call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later for security
+    allow_origins=["*"],   # you can tighten this later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------
+# ---------------------------------------------------
 # In-memory "session store"
-# In production, replace with Redis/Postgres/S3.
-# -----------------------------
+# (For MVP only; wiped on restart / cold start)
+# ---------------------------------------------------
 SESSIONS: Dict[str, pd.DataFrame] = {}
 
 
-# -----------------------------
-# Pydantic models (API schemas)
-# -----------------------------
+# ---------------------------------------------------
+# Pydantic models for API schemas
+# ---------------------------------------------------
 class ColumnInfo(BaseModel):
     name: str
     dtype: str
-    role: str  # "numeric", "categorical", "datetime", "text"
+    role: str          # "numeric" | "categorical" | "datetime" | "text"
     missing_pct: float
 
 
@@ -74,13 +74,13 @@ class ProfileResponse(BaseModel):
     session_id: str
     n_rows: int
     n_cols: int
-    columns: List[ColumnInfo]
-    schema: List[ColumnInfo]         # <— NEW: duplicate of columns, for frontend
+    columns: List[ColumnInfo]        # original field
+    schema: List[ColumnInfo]         # NEW: duplicate of columns for frontend
     descriptives: List[DescriptiveStats]
 
 
 class CorrelationResponse(BaseModel):
-    matrix: Dict[str, Dict[str, float]]  # nested dict: col -> col -> corr
+    matrix: Dict[str, Dict[str, float]]  # col -> col -> corr
 
 
 class AnalysisResponse(BaseModel):
@@ -90,9 +90,9 @@ class AnalysisResponse(BaseModel):
     regression: Optional[RegressionResult] = None
 
 
-# -----------------------------
+# ---------------------------------------------------
 # Utility functions
-# -----------------------------
+# ---------------------------------------------------
 def _infer_role(series: pd.Series) -> str:
     """Classify column into a simple role for UI logic."""
     if pd.api.types.is_numeric_dtype(series):
@@ -183,17 +183,19 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
-   return ProfileResponse(
+    # NOTE: schema is just an alias of columns for frontend compatibility
+    return ProfileResponse(
         session_id=session_id,
         n_rows=int(len(df)),
         n_cols=int(df.shape[1]),
         columns=cols,
-        schema=cols,                  # <— NEW line: same list
+        schema=cols,
         descriptives=descriptives,
     )
 
 
 def _build_correlation(df: pd.DataFrame) -> Optional[CorrelationResponse]:
+    """Build correlation matrix for numeric columns."""
     numeric_df = df.select_dtypes(include=[np.number]).dropna(axis=0, how="any")
     if numeric_df.shape[1] < 2:
         return None
@@ -206,13 +208,11 @@ def _build_correlation(df: pd.DataFrame) -> Optional[CorrelationResponse]:
 
 
 def _auto_tests(df: pd.DataFrame, profile: ProfileResponse) -> List[TestResult]:
-    """Run simple t-test or ANOVA when possible."""
+    """Run simple t-test or ANOVA if data supports it."""
     tests: List[TestResult] = []
 
     numeric_cols = [c.name for c in profile.columns if c.role == "numeric"]
-    cat_cols = [
-        c.name for c in profile.columns if c.role == "categorical"
-    ]
+    cat_cols = [c.name for c in profile.columns if c.role == "categorical"]
 
     if not numeric_cols or not cat_cols:
         return tests
@@ -269,14 +269,14 @@ def _auto_tests(df: pd.DataFrame, profile: ProfileResponse) -> List[TestResult]:
                 )
             )
     except Exception:
-        # swallow errors – engine should fail soft for testing
+        # Fail soft: if stats error, just skip tests
         return tests
 
     return tests
 
 
 def _auto_regression(df: pd.DataFrame, profile: ProfileResponse) -> Optional[RegressionResult]:
-    """Fit a simple linear regression: first numeric as y, others as X."""
+    """Fit a simple OLS regression: first numeric as y, others as X."""
     numeric_cols = [c.name for c in profile.columns if c.role == "numeric"]
     if len(numeric_cols) < 2:
         return None
@@ -307,11 +307,12 @@ def _auto_regression(df: pd.DataFrame, profile: ProfileResponse) -> Optional[Reg
     )
 
 
-# -----------------------------
+# ---------------------------------------------------
 # API endpoints
-# -----------------------------
+# ---------------------------------------------------
 @app.get("/health")
 def health_check():
+    """Simple health check endpoint."""
     return {"status": "ok"}
 
 
@@ -354,4 +355,3 @@ async def run_analysis(session_id: str):
         tests=tests,
         regression=regression,
     )
-
