@@ -75,6 +75,7 @@ class ProfileResponse(BaseModel):
     n_rows: int
     n_cols: int
     columns: List[ColumnInfo]
+    schema: List[ColumnInfo]         # <— NEW: duplicate of columns, for frontend
     descriptives: List[DescriptiveStats]
 
 
@@ -182,11 +183,12 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
-    return ProfileResponse(
+   return ProfileResponse(
         session_id=session_id,
         n_rows=int(len(df)),
         n_cols=int(df.shape[1]),
         columns=cols,
+        schema=cols,                  # <— NEW line: same list
         descriptives=descriptives,
     )
 
