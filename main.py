@@ -254,7 +254,7 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
     for col in df.columns:
         s = df[col]
         role = _infer_role(s)
-        missing_pct = float(s.isna().mean() * 100)
+        missing_pct = float(s.isna().mean() * 100)  # Keep as percentage for display
 
         cols.append(
             ColumnInfo(
@@ -296,8 +296,9 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
-    # Build missing_summary
-    missing_summary = {c.name: c.missing_pct for c in cols}
+    # Build missing_summary as decimal (0-1) for Lovable frontend
+    # Frontend multiplies by 100 to display as percentage
+    missing_summary = {c.name: round(c.missing_pct / 100, 4) for c in cols}
     
     # Generate cleaning_suggestions
     cleaning_suggestions = _generate_cleaning_suggestions(df, cols)
