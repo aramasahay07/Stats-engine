@@ -44,6 +44,7 @@ SESSIONS: Dict[str, Tuple[pd.DataFrame, datetime]] = {}
 class ColumnInfo(BaseModel):
     name: str
     dtype: str
+    type: str          # ✅ What Lovable frontend expects (same as role)
     role: str          # "numeric" | "categorical" | "datetime" | "text"
     missing_pct: float
 
@@ -85,6 +86,8 @@ class ProfileResponse(BaseModel):
     columns: List[ColumnInfo]
     schema: List[ColumnInfo]
     descriptives: List[DescriptiveStats]
+    missing_summary: Dict[str, float]  # ✅ Required by Lovable
+    cleaning_suggestions: List[str]    # ✅ Required by Lovable
 
 
 class UploadResponse(BaseModel):
@@ -94,6 +97,8 @@ class UploadResponse(BaseModel):
     columns: List[ColumnInfo]
     schema: List[ColumnInfo]
     descriptives: List[DescriptiveStats]
+    missing_summary: Dict[str, float]  # ✅ Required by Lovable
+    cleaning_suggestions: List[str]    # ✅ Required by Lovable
     sample_rows: List[Dict]
 
 
@@ -255,6 +260,7 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
             ColumnInfo(
                 name=col,
                 dtype=str(s.dtype),
+                type=role,  # ✅ Map role to type for Lovable frontend
                 role=role,
                 missing_pct=round(missing_pct, 2),
             )
@@ -290,6 +296,12 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
+    # Build missing_summary
+    missing_summary = {c.name: c.missing_pct for c in cols}
+    
+    # Generate cleaning_suggestions
+    cleaning_suggestions = _generate_cleaning_suggestions(df, cols)
+
     return ProfileResponse(
         session_id=session_id,
         n_rows=int(len(df)),
@@ -297,6 +309,8 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
         columns=cols,
         schema=cols,
         descriptives=descriptives,
+        missing_summary=missing_summary,
+        cleaning_suggestions=cleaning_suggestions,
     )
 
 
@@ -445,6 +459,53 @@ def _prepare_sample_rows(df: pd.DataFrame, max_rows: int = 200) -> List[Dict]:
         return []
 
 
+def _generate_cleaning_suggestions(df: pd.DataFrame, cols: List[ColumnInfo]) -> List[str]:
+    """
+    Generate data cleaning suggestions based on data analysis.
+    Returns a list of human-readable suggestions for the UI.
+    """
+    suggestions = []
+    
+    # Check for high missing values
+    for col in cols:
+        if col.missing_pct > 50:
+            suggestions.append(f"Column '{col.name}' has {col.missing_pct:.1f}% missing values - consider dropping or imputing")
+        elif col.missing_pct > 20:
+            suggestions.append(f"Column '{col.name}' has {col.missing_pct:.1f}% missing values - may need imputation")
+    
+    # Check for potential duplicates
+    if df.duplicated().sum() > 0:
+        dup_count = df.duplicated().sum()
+        dup_pct = (dup_count / len(df)) * 100
+        suggestions.append(f"Found {dup_count} duplicate rows ({dup_pct:.1f}%) - consider removing duplicates")
+    
+    # Check for single-value columns (constant)
+    for col in cols:
+        if col.name in df.columns:
+            if df[col.name].nunique() == 1:
+                suggestions.append(f"Column '{col.name}' has only one unique value - consider dropping")
+    
+    # Check for high cardinality text columns
+    for col in cols:
+        if col.type == "text" and col.name in df.columns:
+            unique_ratio = df[col.name].nunique() / len(df)
+            if unique_ratio > 0.95:
+                suggestions.append(f"Column '{col.name}' has very high cardinality ({unique_ratio*100:.1f}%) - may not be useful for analysis")
+    
+    # Check for numeric columns that might be categorical
+    for col in cols:
+        if col.type == "numeric" and col.name in df.columns:
+            unique_count = df[col.name].nunique()
+            if unique_count <= 10 and unique_count > 1:
+                suggestions.append(f"Column '{col.name}' has only {unique_count} unique values - consider treating as categorical")
+    
+    # If no issues found, add a positive message
+    if not suggestions:
+        suggestions.append("Data looks clean! No major issues detected.")
+    
+    return suggestions
+
+
 # ---------------------------------------------------
 # API endpoints
 # ---------------------------------------------------
@@ -541,6 +602,7 @@ async def upload_file(file: UploadFile = File(...)):
         logger.info(f"Prepared {len(sample_rows)} sample rows")
         
         # 7) Return response using the UploadResponse model
+        # Note: profile already contains missing_summary and cleaning_suggestions
         return UploadResponse(
             session_id=profile.session_id,
             n_rows=profile.n_rows,
@@ -548,6 +610,8 @@ async def upload_file(file: UploadFile = File(...)):
             columns=profile.columns,
             schema=profile.schema,
             descriptives=profile.descriptives,
+            missing_summary=profile.missing_summary,
+            cleaning_suggestions=profile.cleaning_suggestions,
             sample_rows=sample_rows
         )
         
