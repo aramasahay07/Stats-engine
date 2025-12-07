@@ -329,41 +329,12 @@ def health_check():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """
-    Upload a CSV/Excel file, store a cleaned DataFrame in memory,
-    and return a profile summary + session_id + real sample_rows.
-    """
-    try:
-        df = _load_dataframe(file)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Loader error: {e}")
-
-    try:
-        # Basic cleaning: drop columns that are all missing
-        df = df.dropna(axis=1, how="all")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dropna error: {e}")
-
-    session_id = str(uuid4())
-    SESSIONS[session_id] = df
-
-    try:
-        profile = _build_profile(df, session_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Profile error: {e}")
-
-    try:
-        # 2000 real sample rows for Lovable
-        sample_rows = df.head(2000).to_dict(orient="records")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sample rows error: {e}")
-
-    # Return everything the old frontend expects + new field
+    # 🔍 TEMP TEST ENDPOINT
+    # If this still returns 500, the issue is NOT in pandas/stats logic.
     return {
-        **profile.dict(),
-        "sample_rows": sample_rows,
+        "message": "upload endpoint hit",
+        "filename": file.filename,
+        "content_type": file.content_type,
     }
 
 
