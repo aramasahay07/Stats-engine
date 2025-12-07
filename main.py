@@ -120,6 +120,21 @@ class SessionStats(BaseModel):
     session_ids: List[str]
 
 
+class SchemaResponse(BaseModel):
+    session_id: str
+    n_rows: int
+    n_cols: int
+    schema: List[ColumnInfo]
+    missing_summary: Dict[str, float]
+
+
+class SampleResponse(BaseModel):
+    session_id: str
+    sample_rows: List[Dict]
+    total_rows: int
+    returned_rows: int
+
+
 # ---------------------------------------------------
 # Session Management Functions
 # ---------------------------------------------------
@@ -657,4 +672,70 @@ async def run_analysis(session_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"Analysis failed: {str(e)}"
+        )
+
+
+@app.get("/schema/{session_id}", response_model=SchemaResponse)
+async def get_schema(session_id: str):
+    """
+    Get the schema (column information) for a previously uploaded dataset.
+    This is useful for fetching column metadata without re-uploading the file.
+    """
+    try:
+        logger.info(f"Fetching schema for session: {session_id}")
+        
+        df = _get_session_dataframe(session_id)
+        profile = _build_profile(df, session_id)
+        
+        return SchemaResponse(
+            session_id=session_id,
+            n_rows=profile.n_rows,
+            n_cols=profile.n_cols,
+            schema=profile.schema,
+            missing_summary=profile.missing_summary,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Schema fetch error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch schema: {str(e)}"
+        )
+
+
+@app.get("/sample/{session_id}", response_model=SampleResponse)
+async def get_sample(session_id: str, max_rows: int = 100):
+    """
+    Get sample rows from a previously uploaded dataset.
+    
+    Args:
+        session_id: The session ID from the upload response
+        max_rows: Maximum number of rows to return (default: 100, max: 500)
+    """
+    try:
+        logger.info(f"Fetching sample for session: {session_id}, max_rows: {max_rows}")
+        
+        # Validate max_rows parameter
+        if max_rows < 1:
+            raise HTTPException(status_code=400, detail="max_rows must be at least 1")
+        if max_rows > 500:
+            raise HTTPException(status_code=400, detail="max_rows cannot exceed 500")
+        
+        df = _get_session_dataframe(session_id)
+        sample_rows = _prepare_sample_rows(df, max_rows=max_rows)
+        
+        return SampleResponse(
+            session_id=session_id,
+            sample_rows=sample_rows,
+            total_rows=len(df),
+            returned_rows=len(sample_rows),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sample fetch error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch sample: {str(e)}"
         )
