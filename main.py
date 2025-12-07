@@ -1,9 +1,10 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from uuid import uuid4
 from io import BytesIO
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------
 # FastAPI app setup
 # ---------------------------------------------------
-app = FastAPI(title="AI Data Lab Stats Engine", version="0.3.0")
+app = FastAPI(title="AI Data Lab Stats Engine", version="0.4.0")
 
 # CORS so Lovable (browser frontend) can call this API
 app.add_middleware(
@@ -31,10 +32,10 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------
-# In-memory "session store"
+# In-memory "session store" with timestamps
 # (For MVP only; wiped on restart / cold start)
 # ---------------------------------------------------
-SESSIONS: Dict[str, pd.DataFrame] = {}
+SESSIONS: Dict[str, Tuple[pd.DataFrame, datetime]] = {}
 
 
 # ---------------------------------------------------
@@ -107,6 +108,51 @@ class AnalysisResponse(BaseModel):
     regression: Optional[RegressionResult] = None
 
 
+class SessionStats(BaseModel):
+    total_sessions: int
+    memory_used_mb: float
+    oldest_session_age_minutes: Optional[float]
+    session_ids: List[str]
+
+
+# ---------------------------------------------------
+# Session Management Functions
+# ---------------------------------------------------
+def _clean_old_sessions(max_age_hours: int = 24) -> int:
+    """
+    Remove sessions older than max_age_hours.
+    Returns number of sessions cleaned.
+    """
+    cutoff = datetime.now() - timedelta(hours=max_age_hours)
+    expired = [
+        sid for sid, (_, timestamp) in SESSIONS.items() 
+        if timestamp < cutoff
+    ]
+    for sid in expired:
+        del SESSIONS[sid]
+        logger.info(f"Cleaned expired session: {sid}")
+    
+    return len(expired)
+
+
+def _get_session_dataframe(session_id: str) -> pd.DataFrame:
+    """
+    Retrieve dataframe from session store.
+    Raises HTTPException if not found.
+    """
+    session_data = SESSIONS.get(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    
+    df, _ = session_data
+    return df
+
+
+def _store_session(session_id: str, df: pd.DataFrame):
+    """Store dataframe with current timestamp."""
+    SESSIONS[session_id] = (df, datetime.now())
+
+
 # ---------------------------------------------------
 # Utility functions
 # ---------------------------------------------------
@@ -121,6 +167,39 @@ def _infer_role(series: pd.Series) -> str:
     if unique_ratio < 0.2:
         return "categorical"
     return "text"
+
+
+def _auto_detect_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Try to convert text columns that look like dates into datetime.
+    Safe - returns original if conversion fails.
+    """
+    for col in df.columns:
+        if df[col].dtype == 'object':  # Only check text columns
+            # Sample a few values to see if they look like dates
+            sample = df[col].dropna().head(100)
+            if len(sample) == 0:
+                continue
+                
+            # Check if values contain date-like patterns
+            try:
+                date_like = sample.astype(str).str.contains(
+                    r'\d{1,4}[-/]\d{1,2}[-/]\d{1,4}', 
+                    regex=True,
+                    na=False
+                ).sum()
+                
+                # If >50% look like dates, try to convert
+                if date_like / len(sample) > 0.5:
+                    try:
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                        logger.info(f"Converted column '{col}' to datetime")
+                    except Exception as e:
+                        logger.debug(f"Could not convert {col} to datetime: {e}")
+            except Exception as e:
+                logger.debug(f"Error checking {col} for dates: {e}")
+    
+    return df
 
 
 def _load_dataframe(file: UploadFile) -> pd.DataFrame:
@@ -333,11 +412,18 @@ def _auto_regression(df: pd.DataFrame, profile: ProfileResponse) -> Optional[Reg
     )
 
 
-def _prepare_sample_rows(df: pd.DataFrame, max_rows: int = 100) -> List[Dict]:
+def _prepare_sample_rows(df: pd.DataFrame, max_rows: int = 200) -> List[Dict]:
     """
     Prepare sample rows for JSON serialization.
     Handles NaN, datetime, and other non-JSON-serializable types.
+    
+    Args:
+        df: DataFrame to sample
+        max_rows: Maximum rows to return (capped at 500 for safety)
     """
+    # Safety cap
+    max_rows = min(max_rows, 500)
+    
     try:
         # Take sample
         sample_df = df.head(max_rows).copy()
@@ -365,7 +451,55 @@ def _prepare_sample_rows(df: pd.DataFrame, max_rows: int = 100) -> List[Dict]:
 @app.get("/health")
 def health_check():
     """Simple health check endpoint."""
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.4.0"}
+
+
+@app.get("/sessions/stats", response_model=SessionStats)
+async def session_stats():
+    """
+    Get statistics about current sessions.
+    Useful for monitoring memory usage and session lifecycle.
+    """
+    total_sessions = len(SESSIONS)
+    
+    # Calculate total memory usage
+    total_memory = 0
+    oldest_timestamp = None
+    
+    for df, timestamp in SESSIONS.values():
+        total_memory += df.memory_usage(deep=True).sum()
+        if oldest_timestamp is None or timestamp < oldest_timestamp:
+            oldest_timestamp = timestamp
+    
+    # Calculate age of oldest session
+    oldest_age_minutes = None
+    if oldest_timestamp:
+        oldest_age_minutes = (datetime.now() - oldest_timestamp).total_seconds() / 60
+    
+    return SessionStats(
+        total_sessions=total_sessions,
+        memory_used_mb=round(total_memory / 1024 / 1024, 2),
+        oldest_session_age_minutes=round(oldest_age_minutes, 2) if oldest_age_minutes else None,
+        session_ids=list(SESSIONS.keys())
+    )
+
+
+@app.post("/sessions/cleanup")
+async def cleanup_sessions(max_age_hours: int = 24):
+    """
+    Clean up expired sessions older than max_age_hours.
+    Returns the number of sessions cleaned.
+    """
+    cleaned = _clean_old_sessions(max_age_hours)
+    remaining = len(SESSIONS)
+    
+    logger.info(f"Cleaned {cleaned} sessions, {remaining} remaining")
+    
+    return {
+        "cleaned": cleaned,
+        "remaining": remaining,
+        "max_age_hours": max_age_hours
+    }
 
 
 @app.post("/upload", response_model=UploadResponse)
@@ -377,28 +511,36 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         logger.info(f"Received file upload: {file.filename}")
         
+        # Clean old sessions before processing new upload
+        cleaned = _clean_old_sessions(max_age_hours=24)
+        if cleaned > 0:
+            logger.info(f"Auto-cleaned {cleaned} expired sessions")
+        
         # 1) Load the file
         df = _load_dataframe(file)
         logger.info(f"Successfully loaded dataframe with shape: {df.shape}")
         
-        # 2) Basic cleaning: drop columns that are all missing
+        # 2) Auto-detect and convert date columns
+        df = _auto_detect_dates(df)
+        
+        # 3) Basic cleaning: drop columns that are all missing
         df = df.dropna(axis=1, how="all")
         logger.info(f"After cleaning, shape: {df.shape}")
         
-        # 3) Store in session
+        # 4) Store in session with timestamp
         session_id = str(uuid4())
-        SESSIONS[session_id] = df
+        _store_session(session_id, df)
         logger.info(f"Stored dataframe with session_id: {session_id}")
         
-        # 4) Build profile
+        # 5) Build profile
         profile = _build_profile(df, session_id)
         logger.info(f"Built profile with {len(profile.columns)} columns")
         
-        # 5) Prepare sample rows with proper serialization
-        sample_rows = _prepare_sample_rows(df, max_rows=100)
+        # 6) Prepare sample rows with proper serialization (200 rows, max 500)
+        sample_rows = _prepare_sample_rows(df, max_rows=200)
         logger.info(f"Prepared {len(sample_rows)} sample rows")
         
-        # 6) Return response using the UploadResponse model
+        # 7) Return response using the UploadResponse model
         return UploadResponse(
             session_id=profile.session_id,
             n_rows=profile.n_rows,
@@ -428,10 +570,8 @@ async def run_analysis(session_id: str):
     try:
         logger.info(f"Running analysis for session: {session_id}")
         
-        df = SESSIONS.get(session_id)
-        if df is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-
+        df = _get_session_dataframe(session_id)
+        
         profile = _build_profile(df, session_id)
         correlation = _build_correlation(df)
         tests = _auto_tests(df, profile)
