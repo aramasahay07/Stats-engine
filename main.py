@@ -118,13 +118,13 @@ def _load_dataframe(file: UploadFile) -> pd.DataFrame:
 
     try:
         if filename.endswith(".csv"):
-            # First try default parser
+            # Try default engine first
             try:
                 df = pd.read_csv(buffer)
             except Exception:
-                # Fallback: more tolerant engine
+                # Fallback: more tolerant parser
                 buffer.seek(0)
-                df = pd.read_csv(buffer, engine="python")
+                df = pd.read_csv(buffer, engine="python", on_bad_lines="skip")
         elif filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(buffer)
         else:
@@ -133,8 +133,10 @@ def _load_dataframe(file: UploadFile) -> pd.DataFrame:
                 detail="Unsupported file type. Please upload CSV or Excel.",
             )
     except HTTPException:
+        # pass through our own HTTP errors
         raise
     except Exception as e:
+        # Any other parsing error
         raise HTTPException(
             status_code=400,
             detail=f"Failed to parse file as CSV/Excel: {e}",
@@ -329,12 +331,46 @@ def health_check():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    # 🔍 TEMP TEST ENDPOINT
-    # If this still returns 500, the issue is NOT in pandas/stats logic.
+    """
+    Upload a CSV/Excel file, store a cleaned DataFrame in memory,
+    and return a profile summary + session_id + real sample_rows.
+    """
+
+    # 1) Load the file into a DataFrame
+    try:
+        df = _load_dataframe(file)
+    except HTTPException:
+        # _load_dataframe already set a good error message
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Loader error: {e}")
+
+    # 2) Basic cleaning: drop columns that are all missing
+    try:
+        df = df.dropna(axis=1, how="all")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Dropna error: {e}")
+
+    # 3) Store in session memory
+    session_id = str(uuid4())
+    SESSIONS[session_id] = df
+
+    # 4) Build profile (columns, schema, descriptives)
+    try:
+        profile = _build_profile(df, session_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Profile error: {e}")
+
+    # 5) Build real sample rows (first 2000 rows)
+    try:
+        sample_rows = df.head(2000).to_dict(orient="records")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sample rows error: {e}")
+
+    # 6) Return everything the frontend expects + sample_rows
     return {
-        "message": "upload endpoint hit",
-        "filename": file.filename,
-        "content_type": file.content_type,
+        **profile.dict(),   # session_id, n_rows, n_cols, columns, schema, descriptives
+        "sample_rows": sample_rows,
     }
 
 
