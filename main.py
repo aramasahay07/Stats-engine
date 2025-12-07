@@ -75,7 +75,7 @@ class ProfileResponse(BaseModel):
     n_rows: int
     n_cols: int
     columns: List[ColumnInfo]        # original field
-    schema: List[ColumnInfo]         # NEW: duplicate of columns for frontend
+    schema: List[ColumnInfo]         # duplicate of columns for frontend
     descriptives: List[DescriptiveStats]
 
 
@@ -107,18 +107,24 @@ def _infer_role(series: pd.Series) -> str:
 
 
 def _load_dataframe(file: UploadFile) -> pd.DataFrame:
-    """Read CSV or Excel file into a pandas DataFrame."""
+    """Read CSV or Excel file into a pandas DataFrame, with safe fallbacks."""
     content = file.file.read()
     file.file.close()
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
 
     buffer = BytesIO(content)
-    filename = file.filename.lower()
+    filename = (file.filename or "").lower()
 
     try:
         if filename.endswith(".csv"):
-            df = pd.read_csv(buffer)
+            # First try default parser
+            try:
+                df = pd.read_csv(buffer)
+            except Exception:
+                # Fallback: more tolerant engine
+                buffer.seek(0)
+                df = pd.read_csv(buffer, engine="python")
         elif filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(buffer)
         else:
@@ -126,8 +132,13 @@ def _load_dataframe(file: UploadFile) -> pd.DataFrame:
                 status_code=400,
                 detail="Unsupported file type. Please upload CSV or Excel.",
             )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse file as CSV/Excel: {e}",
+        )
 
     if df.empty:
         raise HTTPException(status_code=400, detail="File contained no rows.")
@@ -183,7 +194,7 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
-    # NOTE: schema is just an alias of columns for frontend compatibility
+    # schema is just an alias of columns for frontend compatibility
     return ProfileResponse(
         session_id=session_id,
         n_rows=int(len(df)),
@@ -318,15 +329,22 @@ def health_check():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
+    """
+    Upload a CSV/Excel file, store a cleaned DataFrame in memory,
+    and return a profile summary + session_id + real sample_rows.
+    """
     try:
         df = _load_dataframe(file)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Loader error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Loader error: {e}")
 
     try:
+        # Basic cleaning: drop columns that are all missing
         df = df.dropna(axis=1, how="all")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dropna error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Dropna error: {e}")
 
     session_id = str(uuid4())
     SESSIONS[session_id] = df
@@ -334,13 +352,15 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         profile = _build_profile(df, session_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Profile error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Profile error: {e}")
 
     try:
+        # 2000 real sample rows for Lovable
         sample_rows = df.head(2000).to_dict(orient="records")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sample rows error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Sample rows error: {e}")
 
+    # Return everything the old frontend expects + new field
     return {
         **profile.dict(),
         "sample_rows": sample_rows,
