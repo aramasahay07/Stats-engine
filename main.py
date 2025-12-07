@@ -8,16 +8,23 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import statsmodels.api as sm
+import logging
+
+# ---------------------------------------------------
+# Logging setup
+# ---------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------
 # FastAPI app setup
 # ---------------------------------------------------
-app = FastAPI(title="AI Data Lab Stats Engine", version="0.2.0")
+app = FastAPI(title="AI Data Lab Stats Engine", version="0.3.0")
 
 # CORS so Lovable (browser frontend) can call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # you can tighten this later
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,13 +81,23 @@ class ProfileResponse(BaseModel):
     session_id: str
     n_rows: int
     n_cols: int
-    columns: List[ColumnInfo]        # original field
-    schema: List[ColumnInfo]         # duplicate of columns for frontend
+    columns: List[ColumnInfo]
+    schema: List[ColumnInfo]
     descriptives: List[DescriptiveStats]
 
 
+class UploadResponse(BaseModel):
+    session_id: str
+    n_rows: int
+    n_cols: int
+    columns: List[ColumnInfo]
+    schema: List[ColumnInfo]
+    descriptives: List[DescriptiveStats]
+    sample_rows: List[Dict]
+
+
 class CorrelationResponse(BaseModel):
-    matrix: Dict[str, Dict[str, float]]  # col -> col -> corr
+    matrix: Dict[str, Dict[str, float]]
 
 
 class AnalysisResponse(BaseModel):
@@ -133,10 +150,8 @@ def _load_dataframe(file: UploadFile) -> pd.DataFrame:
                 detail="Unsupported file type. Please upload CSV or Excel.",
             )
     except HTTPException:
-        # pass through our own HTTP errors
         raise
     except Exception as e:
-        # Any other parsing error
         raise HTTPException(
             status_code=400,
             detail=f"Failed to parse file as CSV/Excel: {e}",
@@ -196,7 +211,6 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
-    # schema is just an alias of columns for frontend compatibility
     return ProfileResponse(
         session_id=session_id,
         n_rows=int(len(df)),
@@ -282,7 +296,6 @@ def _auto_tests(df: pd.DataFrame, profile: ProfileResponse) -> List[TestResult]:
                 )
             )
     except Exception:
-        # Fail soft: if stats error, just skip tests
         return tests
 
     return tests
@@ -320,6 +333,32 @@ def _auto_regression(df: pd.DataFrame, profile: ProfileResponse) -> Optional[Reg
     )
 
 
+def _prepare_sample_rows(df: pd.DataFrame, max_rows: int = 100) -> List[Dict]:
+    """
+    Prepare sample rows for JSON serialization.
+    Handles NaN, datetime, and other non-JSON-serializable types.
+    """
+    try:
+        # Take sample
+        sample_df = df.head(max_rows).copy()
+        
+        # Replace NaN with None for JSON serialization
+        sample_df = sample_df.where(pd.notnull(sample_df), None)
+        
+        # Convert datetime columns to ISO format strings
+        for col in sample_df.columns:
+            if pd.api.types.is_datetime64_any_dtype(sample_df[col]):
+                sample_df[col] = sample_df[col].apply(
+                    lambda x: x.isoformat() if pd.notnull(x) else None
+                )
+        
+        # Convert to records
+        return sample_df.to_dict(orient="records")
+    except Exception as e:
+        logger.error(f"Error preparing sample rows: {e}")
+        return []
+
+
 # ---------------------------------------------------
 # API endpoints
 # ---------------------------------------------------
@@ -329,49 +368,55 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.post("/upload")
+@app.post("/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...)):
     """
     Upload a CSV/Excel file, store a cleaned DataFrame in memory,
     and return a profile summary + session_id + real sample_rows.
     """
-
-    # 1) Load the file into a DataFrame
     try:
+        logger.info(f"Received file upload: {file.filename}")
+        
+        # 1) Load the file
         df = _load_dataframe(file)
+        logger.info(f"Successfully loaded dataframe with shape: {df.shape}")
+        
+        # 2) Basic cleaning: drop columns that are all missing
+        df = df.dropna(axis=1, how="all")
+        logger.info(f"After cleaning, shape: {df.shape}")
+        
+        # 3) Store in session
+        session_id = str(uuid4())
+        SESSIONS[session_id] = df
+        logger.info(f"Stored dataframe with session_id: {session_id}")
+        
+        # 4) Build profile
+        profile = _build_profile(df, session_id)
+        logger.info(f"Built profile with {len(profile.columns)} columns")
+        
+        # 5) Prepare sample rows with proper serialization
+        sample_rows = _prepare_sample_rows(df, max_rows=100)
+        logger.info(f"Prepared {len(sample_rows)} sample rows")
+        
+        # 6) Return response using the UploadResponse model
+        return UploadResponse(
+            session_id=profile.session_id,
+            n_rows=profile.n_rows,
+            n_cols=profile.n_cols,
+            columns=profile.columns,
+            schema=profile.schema,
+            descriptives=profile.descriptives,
+            sample_rows=sample_rows
+        )
+        
     except HTTPException:
-        # _load_dataframe already set a good error message
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Loader error: {e}")
-
-    # 2) Basic cleaning: drop columns that are all missing
-    try:
-        df = df.dropna(axis=1, how="all")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dropna error: {e}")
-
-    # 3) Store in session memory
-    session_id = str(uuid4())
-    SESSIONS[session_id] = df
-
-    # 4) Build profile (columns, schema, descriptives)
-    try:
-        profile = _build_profile(df, session_id)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Profile error: {e}")
-
-    # 5) Build real sample rows (first 2000 rows)
-    try:
-        sample_rows = df.head(2000).to_dict(orient="records")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sample rows error: {e}")
-
-    # 6) Return everything the frontend expects + sample_rows
-    return {
-        **profile.dict(),   # session_id, n_rows, n_cols, columns, schema, descriptives
-        "sample_rows": sample_rows,
-    }
+        logger.error(f"Upload error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Upload failed: {str(e)}"
+        )
 
 
 @app.get("/analysis/{session_id}", response_model=AnalysisResponse)
@@ -380,18 +425,31 @@ async def run_analysis(session_id: str):
     Run correlation, simple group tests, and linear regression
     for the given session_id.
     """
-    df = SESSIONS.get(session_id)
-    if df is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        logger.info(f"Running analysis for session: {session_id}")
+        
+        df = SESSIONS.get(session_id)
+        if df is None:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    profile = _build_profile(df, session_id)
-    correlation = _build_correlation(df)
-    tests = _auto_tests(df, profile)
-    regression = _auto_regression(df, profile)
+        profile = _build_profile(df, session_id)
+        correlation = _build_correlation(df)
+        tests = _auto_tests(df, profile)
+        regression = _auto_regression(df, profile)
 
-    return AnalysisResponse(
-        session_id=session_id,
-        correlation=correlation,
-        tests=tests,
-        regression=regression,
-    )
+        logger.info(f"Analysis complete for session: {session_id}")
+
+        return AnalysisResponse(
+            session_id=session_id,
+            correlation=correlation,
+            tests=tests,
+            regression=regression,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Analysis error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Analysis failed: {str(e)}"
+        )
