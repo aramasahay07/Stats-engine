@@ -318,21 +318,29 @@ def health_check():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    df = _load_dataframe(file)
+    try:
+        df = _load_dataframe(file)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Loader error: {str(e)}")
 
-    # Basic cleaning
-    df = df.dropna(axis=1, how="all")
+    try:
+        df = df.dropna(axis=1, how="all")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Dropna error: {str(e)}")
 
     session_id = str(uuid4())
     SESSIONS[session_id] = df
 
-    # Existing profiling logic
-    profile = _build_profile(df, session_id)
+    try:
+        profile = _build_profile(df, session_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Profile error: {str(e)}")
 
-    # NEW: real sample rows (2000)
-    sample_rows = df.head(2000).to_dict(orient="records")
+    try:
+        sample_rows = df.head(2000).to_dict(orient="records")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sample rows error: {str(e)}")
 
-    # Return existing profile + new field
     return {
         **profile.dict(),
         "sample_rows": sample_rows,
