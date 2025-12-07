@@ -316,22 +316,27 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.post("/upload", response_model=ProfileResponse)
+@app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    """
-    Upload a CSV/Excel file, store a cleaned DataFrame in memory,
-    and return a profile summary + session_id.
-    """
     df = _load_dataframe(file)
 
-    # Basic cleaning: drop columns that are all missing
+    # Basic cleaning
     df = df.dropna(axis=1, how="all")
 
     session_id = str(uuid4())
     SESSIONS[session_id] = df
 
+    # Existing profiling logic
     profile = _build_profile(df, session_id)
-    return profile
+
+    # NEW: real sample rows (2000)
+    sample_rows = df.head(2000).to_dict(orient="records")
+
+    # Return existing profile + new field
+    return {
+        **profile.dict(),
+        "sample_rows": sample_rows,
+    }
 
 
 @app.get("/analysis/{session_id}", response_model=AnalysisResponse)
