@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from uuid import uuid4
 from io import BytesIO
 from datetime import datetime, timedelta
@@ -144,8 +144,8 @@ class QueryMetric(BaseModel):
 class QueryFilter(BaseModel):
     column: str
     op: str  # "==", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains", "is_null", "is_not_null", "between"
-    value: Optional[any] = None
-    values: Optional[List] = None  # For "in", "not_in", "between"
+    value: Optional[Any] = None
+    values: Optional[List[Any]] = None  # For "in", "not_in", "between"
 
 
 class QueryOrderBy(BaseModel):
