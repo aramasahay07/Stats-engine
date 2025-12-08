@@ -135,6 +135,43 @@ class SampleResponse(BaseModel):
     returned_rows: int
 
 
+class QueryMetric(BaseModel):
+    column: str
+    agg: str  # "count", "sum", "mean", "median", "min", "max", "std", "var", "nunique", "mode", "iqr", "mad", "skew", "kurt"
+    alias: Optional[str] = None
+
+
+class QueryFilter(BaseModel):
+    column: str
+    op: str  # "==", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains", "is_null", "is_not_null", "between"
+    value: Optional[any] = None
+    values: Optional[List] = None  # For "in", "not_in", "between"
+
+
+class QueryOrderBy(BaseModel):
+    column: str
+    direction: str = "asc"  # "asc" or "desc"
+
+
+class QueryRequest(BaseModel):
+    operation: str  # "aggregate", "filter", "describe", "correlation", "percentile", "distinct", "crosstab", "rank", "binning", "sample"
+    group_by: Optional[List[str]] = None
+    metrics: Optional[List[QueryMetric]] = None
+    filters: Optional[List[QueryFilter]] = None
+    order_by: Optional[List[QueryOrderBy]] = None
+    limit: Optional[int] = None
+    options: Optional[Dict] = None
+
+
+class QueryResponse(BaseModel):
+    success: bool
+    operation: str
+    result: Dict
+    execution_time_ms: float
+    query_summary: str
+    error: Optional[str] = None
+
+
 # ---------------------------------------------------
 # Session Management Functions
 # ---------------------------------------------------
@@ -522,6 +559,451 @@ def _generate_cleaning_suggestions(df: pd.DataFrame, cols: List[ColumnInfo]) -> 
     return suggestions
 
 
+def _apply_filters(df: pd.DataFrame, filters: List[QueryFilter]) -> pd.DataFrame:
+    """Apply filters to a DataFrame based on QueryFilter objects."""
+    result_df = df.copy()
+    
+    for f in filters:
+        col = f.column
+        if col not in result_df.columns:
+            continue
+            
+        if f.op == "==":
+            result_df = result_df[result_df[col] == f.value]
+        elif f.op == "!=":
+            result_df = result_df[result_df[col] != f.value]
+        elif f.op == ">":
+            result_df = result_df[result_df[col] > f.value]
+        elif f.op == ">=":
+            result_df = result_df[result_df[col] >= f.value]
+        elif f.op == "<":
+            result_df = result_df[result_df[col] < f.value]
+        elif f.op == "<=":
+            result_df = result_df[result_df[col] <= f.value]
+        elif f.op == "in" and f.values:
+            result_df = result_df[result_df[col].isin(f.values)]
+        elif f.op == "not_in" and f.values:
+            result_df = result_df[~result_df[col].isin(f.values)]
+        elif f.op == "contains":
+            result_df = result_df[result_df[col].astype(str).str.contains(str(f.value), case=False, na=False)]
+        elif f.op == "starts_with":
+            result_df = result_df[result_df[col].astype(str).str.startswith(str(f.value), na=False)]
+        elif f.op == "is_null":
+            result_df = result_df[result_df[col].isna()]
+        elif f.op == "is_not_null":
+            result_df = result_df[result_df[col].notna()]
+        elif f.op == "between" and f.values and len(f.values) == 2:
+            result_df = result_df[result_df[col].between(f.values[0], f.values[1])]
+    
+    return result_df
+
+
+def _execute_aggregate_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute aggregate operation with grouping and metrics."""
+    # Apply filters first
+    if query.filters:
+        df = _apply_filters(df, query.filters)
+    
+    # Build aggregation dictionary
+    agg_dict = {}
+    aliases = {}
+    
+    if query.metrics:
+        for metric in query.metrics:
+            col = metric.column
+            agg = metric.agg
+            alias = metric.alias or f"{col}_{agg}"
+            
+            if col == "*":
+                # Count all rows
+                if query.group_by:
+                    agg_dict[query.group_by[0]] = "count"
+                    aliases[query.group_by[0]] = alias
+            else:
+                if col not in df.columns:
+                    continue
+                agg_dict[col] = agg
+                aliases[col] = alias
+    
+    # Perform aggregation
+    if query.group_by:
+        result = df.groupby(query.group_by).agg(agg_dict).reset_index()
+        # Rename columns to aliases
+        for old_col, new_col in aliases.items():
+            if old_col in result.columns:
+                result = result.rename(columns={old_col: new_col})
+    else:
+        # Global aggregation
+        result = df.agg(agg_dict).to_frame().T
+        for old_col, new_col in aliases.items():
+            if old_col in result.columns:
+                result = result.rename(columns={old_col: new_col})
+    
+    # Apply ordering
+    if query.order_by:
+        for order in query.order_by:
+            if order.column in result.columns:
+                ascending = order.direction.lower() == "asc"
+                result = result.sort_values(by=order.column, ascending=ascending)
+    
+    # Apply limit
+    if query.limit:
+        result = result.head(query.limit)
+    
+    # Convert to dict
+    data = result.to_dict(orient="records")
+    
+    return {
+        "data": data,
+        "row_count": len(data),
+        "columns": list(result.columns)
+    }
+
+
+def _execute_filter_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute filter operation and return matching rows."""
+    if query.filters:
+        df = _apply_filters(df, query.filters)
+    
+    # Apply ordering
+    if query.order_by:
+        for order in query.order_by:
+            if order.column in df.columns:
+                ascending = order.direction.lower() == "asc"
+                df = df.sort_values(by=order.column, ascending=ascending)
+    
+    # Apply limit
+    if query.limit:
+        df = df.head(query.limit)
+    
+    # Prepare for JSON serialization
+    result_df = df.where(pd.notnull(df), None)
+    data = result_df.to_dict(orient="records")
+    
+    return {
+        "data": data,
+        "row_count": len(data),
+        "columns": list(df.columns)
+    }
+
+
+def _execute_describe_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute describe operation on specified columns."""
+    columns = query.options.get("columns", []) if query.options else []
+    
+    if not columns:
+        # Describe all numeric columns
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    result = {}
+    for col in columns:
+        if col in df.columns:
+            desc = df[col].describe()
+            result[col] = {
+                "count": int(desc.get("count", 0)),
+                "mean": float(desc.get("mean", 0)),
+                "std": float(desc.get("std", 0)),
+                "min": float(desc.get("min", 0)),
+                "25%": float(desc.get("25%", 0)),
+                "50%": float(desc.get("50%", 0)),
+                "75%": float(desc.get("75%", 0)),
+                "max": float(desc.get("max", 0)),
+            }
+    
+    return {"statistics": result}
+
+
+def _execute_correlation_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute correlation operation."""
+    columns = query.options.get("columns", []) if query.options else []
+    method = query.options.get("method", "pearson") if query.options else "pearson"
+    
+    if not columns:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # Filter to requested columns
+    df_subset = df[columns].dropna()
+    
+    if len(df_subset.columns) < 2:
+        return {"error": "Need at least 2 numeric columns for correlation"}
+    
+    corr = df_subset.corr(method=method)
+    corr_dict = {}
+    for col in corr.columns:
+        corr_dict[col] = {idx: float(val) for idx, val in corr[col].items()}
+    
+    return {"correlation_matrix": corr_dict, "method": method}
+
+
+def _execute_distinct_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute distinct operation to get unique values."""
+    columns = query.options.get("columns", []) if query.options else []
+    
+    result = {}
+    for col in columns:
+        if col in df.columns:
+            value_counts = df[col].value_counts()
+            result[col] = {
+                "unique_count": int(df[col].nunique()),
+                "values": df[col].unique().tolist()[:100],  # Limit to 100 for safety
+                "value_counts": {str(k): int(v) for k, v in value_counts.head(50).items()}
+            }
+    
+    return {"distinct_values": result}
+
+
+def _execute_percentile_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute percentile calculation."""
+    columns = query.options.get("columns", []) if query.options else []
+    percentiles = query.options.get("percentiles", [0.25, 0.5, 0.75, 0.95]) if query.options else [0.25, 0.5, 0.75, 0.95]
+    
+    result = {}
+    for col in columns:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            result[col] = {}
+            for p in percentiles:
+                result[col][f"p{int(p*100)}"] = float(df[col].quantile(p))
+    
+    return {"percentiles": result}
+
+
+def _execute_crosstab_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute crosstab/pivot table operation."""
+    options = query.options or {}
+    row_column = options.get("row_column")
+    col_column = options.get("col_column")
+    value_column = options.get("value_column")
+    value_agg = options.get("value_agg", "count")
+    
+    if not row_column or not col_column:
+        return {"error": "crosstab requires row_column and col_column"}
+    
+    # Apply filters first
+    if query.filters:
+        df = _apply_filters(df, query.filters)
+    
+    # Create crosstab
+    if value_column and value_column in df.columns:
+        # Aggregate a specific column
+        result = pd.crosstab(
+            df[row_column],
+            df[col_column],
+            values=df[value_column],
+            aggfunc=value_agg
+        )
+    else:
+        # Count occurrences
+        result = pd.crosstab(df[row_column], df[col_column])
+    
+    # Convert to dict format
+    crosstab_data = result.reset_index().to_dict(orient="records")
+    
+    return {
+        "crosstab": crosstab_data,
+        "row_column": row_column,
+        "col_column": col_column,
+        "columns": list(result.columns),
+        "row_count": len(result)
+    }
+
+
+def _execute_rank_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute ranking operation."""
+    options = query.options or {}
+    rank_by = options.get("rank_by")  # Column to rank by
+    ascending = options.get("ascending", False)
+    method = options.get("method", "dense")  # "average", "min", "max", "dense", "first"
+    
+    if not rank_by or rank_by not in df.columns:
+        return {"error": "rank operation requires valid rank_by column"}
+    
+    # Apply filters first
+    if query.filters:
+        df = _apply_filters(df, query.filters)
+    
+    # Add rank column
+    df_copy = df.copy()
+    df_copy["rank"] = df_copy[rank_by].rank(ascending=ascending, method=method)
+    
+    # Add percentile rank (0-100)
+    df_copy["percentile"] = df_copy[rank_by].rank(pct=True, ascending=ascending) * 100
+    
+    # Apply ordering
+    df_copy = df_copy.sort_values(by=rank_by, ascending=ascending)
+    
+    # Apply limit
+    if query.limit:
+        df_copy = df_copy.head(query.limit)
+    
+    # Prepare for JSON
+    result_df = df_copy.where(pd.notnull(df_copy), None)
+    data = result_df.to_dict(orient="records")
+    
+    return {
+        "data": data,
+        "row_count": len(data),
+        "columns": list(df_copy.columns),
+        "ranked_by": rank_by
+    }
+
+
+def _execute_binning_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute binning/bucketing operation."""
+    options = query.options or {}
+    column = options.get("column")
+    bins = options.get("bins")  # Can be int (number of bins) or list (bin edges)
+    labels = options.get("labels")  # Custom labels for bins
+    
+    if not column or column not in df.columns:
+        return {"error": "binning requires valid column"}
+    
+    if not bins:
+        return {"error": "binning requires bins parameter"}
+    
+    # Apply filters first
+    if query.filters:
+        df = _apply_filters(df, query.filters)
+    
+    df_copy = df.copy()
+    
+    # Create bins
+    try:
+        if isinstance(bins, int):
+            # Equal-width bins
+            df_copy["bin"] = pd.cut(df_copy[column], bins=bins, labels=labels)
+        else:
+            # Custom bin edges
+            df_copy["bin"] = pd.cut(df_copy[column], bins=bins, labels=labels)
+        
+        # Count by bin
+        bin_counts = df_copy["bin"].value_counts().sort_index()
+        
+        # Also calculate statistics per bin if requested
+        if query.group_by or query.metrics:
+            grouped = df_copy.groupby("bin")
+            
+            if query.metrics:
+                agg_dict = {}
+                for metric in query.metrics:
+                    if metric.column in df_copy.columns:
+                        agg_dict[metric.column] = metric.agg
+                
+                stats = grouped.agg(agg_dict).reset_index()
+                data = stats.to_dict(orient="records")
+            else:
+                data = bin_counts.reset_index().to_dict(orient="records")
+        else:
+            data = bin_counts.reset_index().to_dict(orient="records")
+        
+        return {
+            "data": data,
+            "column": column,
+            "bin_count": len(bin_counts),
+            "total_rows": len(df_copy)
+        }
+    except Exception as e:
+        return {"error": f"Binning failed: {str(e)}"}
+
+
+def _execute_sample_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Execute sampling operation."""
+    options = query.options or {}
+    n = options.get("n", 100)  # Number of samples
+    method = options.get("method", "random")  # "random", "stratified"
+    stratify_column = options.get("stratify_column")  # For stratified sampling
+    random_state = options.get("random_state", 42)
+    
+    # Apply filters first
+    if query.filters:
+        df = _apply_filters(df, query.filters)
+    
+    if len(df) == 0:
+        return {"error": "No data after filtering"}
+    
+    # Ensure n doesn't exceed dataframe size
+    n = min(n, len(df))
+    
+    try:
+        if method == "stratified" and stratify_column and stratify_column in df.columns:
+            # Stratified sampling - sample proportionally from each group
+            sampled = df.groupby(stratify_column, group_keys=False).apply(
+                lambda x: x.sample(n=max(1, int(n * len(x) / len(df))), random_state=random_state)
+            )
+        else:
+            # Simple random sampling
+            sampled = df.sample(n=n, random_state=random_state)
+        
+        # Prepare for JSON
+        result_df = sampled.where(pd.notnull(sampled), None)
+        data = result_df.to_dict(orient="records")
+        
+        return {
+            "data": data,
+            "sample_size": len(data),
+            "total_population": len(df),
+            "sampling_method": method
+        }
+    except Exception as e:
+        return {"error": f"Sampling failed: {str(e)}"}
+
+
+def _execute_advanced_describe_query(df: pd.DataFrame, query: QueryRequest) -> Dict:
+    """Enhanced describe with additional statistics."""
+    columns = query.options.get("columns", []) if query.options else []
+    
+    if not columns:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    result = {}
+    for col in columns:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            series = df[col].dropna()
+            
+            if len(series) == 0:
+                continue
+            
+            desc = series.describe()
+            
+            # Basic stats
+            stats = {
+                "count": int(desc.get("count", 0)),
+                "mean": float(desc.get("mean", 0)),
+                "std": float(desc.get("std", 0)),
+                "min": float(desc.get("min", 0)),
+                "q25": float(desc.get("25%", 0)),
+                "median": float(desc.get("50%", 0)),
+                "q75": float(desc.get("75%", 0)),
+                "max": float(desc.get("max", 0)),
+            }
+            
+            # Additional quantiles
+            stats["q10"] = float(series.quantile(0.10))
+            stats["q90"] = float(series.quantile(0.90))
+            stats["q95"] = float(series.quantile(0.95))
+            
+            # IQR (Interquartile Range)
+            stats["iqr"] = float(stats["q75"] - stats["q25"])
+            
+            # MAD (Median Absolute Deviation)
+            mad = (series - series.median()).abs().median()
+            stats["mad"] = float(mad)
+            
+            # Skewness and Kurtosis
+            from scipy import stats as scipy_stats
+            stats["skewness"] = float(scipy_stats.skew(series))
+            stats["kurtosis"] = float(scipy_stats.kurtosis(series))
+            
+            # Coefficient of Variation (CV)
+            if stats["mean"] != 0:
+                stats["cv"] = float(stats["std"] / stats["mean"])
+            else:
+                stats["cv"] = None
+            
+            result[col] = stats
+    
+    return {"statistics": result}
+
+
 # ---------------------------------------------------
 # API endpoints
 # ---------------------------------------------------
@@ -738,4 +1220,82 @@ async def get_sample(session_id: str, max_rows: int = 100):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch sample: {str(e)}"
+        )
+
+
+@app.post("/query/{session_id}", response_model=QueryResponse)
+async def execute_query(session_id: str, query: QueryRequest):
+    """
+    Execute dynamic queries on uploaded dataset.
+    Supports: aggregate, filter, describe, correlation, percentile, distinct operations.
+    
+    This endpoint enables AI agents to ask any question about the data.
+    """
+    import time
+    start_time = time.time()
+    
+    try:
+        logger.info(f"Executing {query.operation} query for session: {session_id}")
+        
+        df = _get_session_dataframe(session_id)
+        
+        # Route to appropriate query executor
+        if query.operation == "aggregate":
+            result = _execute_aggregate_query(df, query)
+            summary = f"Grouped by {query.group_by}, calculated aggregations"
+        elif query.operation == "filter":
+            result = _execute_filter_query(df, query)
+            summary = f"Filtered data with {len(query.filters or [])} conditions"
+        elif query.operation == "describe":
+            result = _execute_advanced_describe_query(df, query)
+            summary = "Enhanced descriptive statistics"
+        elif query.operation == "correlation":
+            result = _execute_correlation_query(df, query)
+            summary = "Correlation analysis"
+        elif query.operation == "percentile":
+            result = _execute_percentile_query(df, query)
+            summary = "Percentile calculation"
+        elif query.operation == "distinct":
+            result = _execute_distinct_query(df, query)
+            summary = "Distinct values analysis"
+        elif query.operation == "crosstab":
+            result = _execute_crosstab_query(df, query)
+            summary = "Crosstab/pivot table"
+        elif query.operation == "rank":
+            result = _execute_rank_query(df, query)
+            summary = "Ranking operation"
+        elif query.operation == "binning":
+            result = _execute_binning_query(df, query)
+            summary = "Binning/bucketing operation"
+        elif query.operation == "sample":
+            result = _execute_sample_query(df, query)
+            summary = "Sampling operation"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported operation: {query.operation}"
+            )
+        
+        execution_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        return QueryResponse(
+            success=True,
+            operation=query.operation,
+            result=result,
+            execution_time_ms=round(execution_time, 2),
+            query_summary=summary
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Query execution error: {str(e)}", exc_info=True)
+        execution_time = (time.time() - start_time) * 1000
+        return QueryResponse(
+            success=False,
+            operation=query.operation,
+            result={},
+            execution_time_ms=round(execution_time, 2),
+            query_summary="Query failed",
+            error=str(e)
         )
