@@ -1,29 +1,11 @@
-# Core API Framework
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-
-# Data Processing
-pandas>=2.0.0
-numpy>=1.24.0
-openpyxl>=3.1.0
-
-<<<<<<< HEAD
-# Statistics & Machine Learning
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pandas==2.1.3
+numpy==1.26.2
+openpyxl==3.1.2
 scipy==1.11.4
 statsmodels==0.14.0
 scikit-learn==1.3.2
-
-# Pydantic for data validation
 pydantic==2.5.0
-
-# Date parsing utilities
 python-dateutil==2.8.2
-=======
-# Statistics
-scipy>=1.11.0
-statsmodels>=0.14.0
-
-# Pydantic
-pydantic>=2.0.0
->>>>>>> 7e41a5238941e014592aea81d5689df8276f2f3f
