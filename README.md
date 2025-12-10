@@ -1,352 +1,142 @@
-# AI Data Lab - Advanced Data Transformation Engine
+# AI Data Lab Backend
 
-A comprehensive Python/FastAPI backend with intelligent data transformations, statistical analysis, and ML-enhanced features.
+Advanced data transformation and analysis engine with 60+ intelligent transforms.
 
 ## 🚀 Features
 
-### Core Capabilities
-- **Smart Data Upload**: Automatic type detection and intelligent date parsing
-- **60+ Transform Types**: Date/time, numeric, text, categorical, and ML-enhanced transforms
-- **Chained Transformations**: Apply multiple transforms in sequence
-- **Transform Discovery**: Auto-suggest appropriate transforms for any column
-- **Caching System**: Efficient transform caching for repeated operations
-- **Statistical Analysis**: Correlation, t-tests, ANOVA, and regression
+- **File Upload**: CSV and Excel support
+- **Smart Type Detection**: Automatic column type inference
+- **60+ Transformations**: Date, numeric, text, and categorical transforms
+- **Statistical Analysis**: Correlation, t-tests, ANOVA, regression
+- **REST API**: FastAPI-powered endpoints
 
-### Transform Categories
+## 📋 API Endpoints
 
-#### 📅 Date/Time Transforms
-- `month`, `year`, `quarter`, `weekday`, `week`, `day`, `hour`
-- `month_year`, `fiscal_quarter`, `date_only`
-- `age_from_date`, `time_features`, `seasonality`
-
-#### 🔢 Numeric Transforms
-- `bucket`, `percentile_bucket`, `bucket_distribution`, `bucket_smart`
-- `round`, `normalize`, `log`, `absolute`, `sign`
-- `rolling`, `difference`, `percent_change`
-- `detect_outliers`, `binning_adaptive`
-
-#### 📝 Text Transforms
-- `lowercase`, `uppercase`, `title_case`, `trim`, `slugify`
-- `length`, `word_count`, `first_word`
-- `extract`, `extract_entity` (email, phone, URL, zip, currency)
-- `replace`, `contains`, `standardize`
-
-#### 🏷️ Categorical Transforms
-- `remap`, `top_n`, `group_rare`, `binary`
-- `null_fill`, `null_fill_smart` (mean, median, mode, forward_fill, interpolate)
-- `encode` (label, frequency, ordinal), `onehot`
-- `conditional` (SQL-like CASE WHEN)
-
-#### 🧠 Smart/ML Transforms
-- `cast_smart`: Intelligent type coercion with validation
-- `outlier_detection`: IQR, z-score, or Isolation Forest
-- `fuzzy_match`: Standardize using string similarity
-- `window_aggregation`: Rolling calculations with grouping
-
-## 📁 Project Structure
-
-```
-backend/
-├── main.py                          # FastAPI app with all endpoints
-├── models.py                        # Pydantic schemas
-├── session_store.py                 # Session & cache management
-├── requirements.txt                 # Python dependencies
-├── transformers/
-│   ├── __init__.py
-│   ├── base.py                      # Base transformer class
-│   ├── datetime_transforms.py      # Date/time transforms
-│   ├── numeric_transforms.py       # Numeric transforms
-│   ├── text_transforms.py          # Text transforms
-│   ├── categorical_transforms.py   # Categorical transforms
-│   ├── smart_transforms.py         # AI/ML transforms
-│   ├── pipeline.py                 # Chain execution
-│   └── registry.py                 # Transform discovery
-└── utils/
-    ├── __init__.py
-    ├── type_inference.py           # Smart type detection
-    ├── date_parser.py              # Intelligent date parsing
-    └── validators.py               # Input validation
-```
-
-## 🛠️ Installation
-
-### 1. Clone Repository
+### Health Check
 ```bash
-git clone <your-repo-url>
-cd backend
+GET /health
 ```
 
-### 2. Create Virtual Environment
-```bash
-python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# Mac/Linux
-source venv/bin/activate
-```
-
-### 3. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Run Server
-```bash
-python main.py
-```
-
-Server will start at `http://localhost:8000`
-
-## 📚 API Documentation
-
-### Upload Data
+### Upload Dataset
 ```bash
 POST /upload
 Content-Type: multipart/form-data
 
-Response:
-{
+Returns: {
   "session_id": "uuid",
   "n_rows": 1000,
-  "n_cols": 15,
-  "columns": [...],
+  "n_cols": 10,
+  "schema": [...],
   "descriptives": [...]
 }
 ```
 
-### Query with Transforms
+### Run Analysis
 ```bash
-POST /query/{session_id}
-Content-Type: application/json
+GET /analysis/{session_id}
 
-{
-  "operation": "aggregate",
-  "group_by": ["admission_date"],
-  "transforms": {
-    "admission_date": {
-      "type": "month",
-      "params": {"format": "name"}
-    }
-  },
-  "aggregations": {
-    "patient_count": "*:count"
-  },
-  "sort": {
-    "column": "admission_date_month",
-    "order": "chronological"
-  }
+Returns: {
+  "correlation": {...},
+  "tests": [...],
+  "regression": {...}
 }
 ```
 
-### Discover Transforms
+## 🛠️ Local Development
+
+### Prerequisites
+- Python 3.11+
+- pip
+
+### Setup
 ```bash
-GET /transforms
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/ai-datalab-backend.git
+cd ai-datalab-backend
 
-Response:
-{
-  "transforms": {
-    "month": {
-      "input_types": ["datetime"],
-      "output_type": "categorical",
-      "description": "Extract month from datetime"
-    },
-    ...
-  }
-}
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the server
+uvicorn main:app --reload
 ```
 
-### Get Transform Suggestions
-```bash
-GET /suggest-transforms/{session_id}?column=admission_date
+Server will be available at: `http://localhost:8000`
 
-Response:
-{
-  "column": "admission_date",
-  "detected_type": "datetime",
-  "suggested_transforms": [
-    {
-      "transform": "month",
-      "usefulness_score": 0.95,
-      "reason": "High cardinality date - monthly aggregation recommended",
-      "preview": ["January", "February", "March"]
-    }
-  ]
-}
-```
+API documentation at: `http://localhost:8000/docs`
 
-## 🎯 Usage Examples
+## 📦 Tech Stack
 
-### Example 1: Monthly Patient Trend
-```python
-# Request
-{
-  "operation": "aggregate",
-  "group_by": ["admission_date"],
-  "transforms": {
-    "admission_date": {
-      "type": "month",
-      "params": {"format": "name"}
-    }
-  },
-  "aggregations": {
-    "patient_count": "*:count"
-  },
-  "sort": {
-    "column": "admission_date_month",
-    "order": "chronological"
-  }
-}
+- **FastAPI**: Modern, fast web framework
+- **Pandas**: Data manipulation
+- **NumPy**: Numerical computing
+- **SciPy**: Statistical functions
+- **Statsmodels**: Advanced statistics
+- **Scikit-learn**: Machine learning utilities
 
-# Result: Monthly patient counts with proper chronological ordering
-```
+## 🌐 Deployment
 
-### Example 2: Age Group Distribution
-```python
-{
-  "operation": "aggregate",
-  "group_by": ["age"],
-  "transforms": {
-    "age": {
-      "type": "bucket",
-      "params": {
-        "bins": [0, 18, 35, 50, 65, 100],
-        "labels": ["Child", "Young Adult", "Adult", "Senior", "Elderly"]
-      }
-    }
-  },
-  "aggregations": {
-    "count": "*:count"
-  }
-}
-```
+### Deploy to Render
 
-### Example 3: Chained Transformations
-```python
-{
-  "transforms": {
-    "lengthofstay_days": {
-      "type": "conditional",
-      "params": {
-        "conditions": [
-          {"when": "lengthofstay_days < 3", "then": "Short Stay"},
-          {"when": "lengthofstay_days < 7", "then": "Medium Stay"},
-          {"when": "lengthofstay_days >= 7", "then": "Long Stay"}
-        ]
-      }
-    }
-  }
-}
-```
+1. Push code to GitHub
+2. Connect repository to Render
+3. Render will auto-detect `render.yaml`
+4. Deploy!
 
-### Example 4: Smart Outlier Detection
-```python
-{
-  "transforms": {
-    "cost": {
-      "type": "detect_outliers",
-      "params": {
-        "method": "isolation_forest",
-        "contamination": 0.1
-      }
-    }
-  }
-}
-```
+### Environment Variables
 
-## 🔧 Advanced Features
+No environment variables required for basic setup.
 
-### Transform Caching
-Transforms are automatically cached per session to improve performance:
-```python
-# First request: Computes transform
-# Subsequent requests: Uses cached result
-```
+## 📊 Transform Categories
 
-### Smart Type Inference
-The system automatically detects:
-- Date formats (MM/DD/YY, YYYY-MM-DD, etc.)
-- Numeric columns with currency symbols
-- Categorical vs text based on cardinality
-- Boolean-like values (Yes/No, T/F, 1/0)
+### Date/Time Transforms
+- Extract month, year, quarter, weekday
+- Calculate fiscal periods
+- Age calculations
+- Time-based features
 
-### Distribution-Aware Binning
-```python
-{
-  "type": "bucket_distribution",
-  "params": {
-    "method": "outlier_aware",  # Excludes outliers when calculating bins
-    "n_bins": 5,
-    "outlier_threshold": 1.5
-  }
-}
-```
+### Numeric Transforms
+- Scaling (standard, min-max, robust)
+- Binning and discretization
+- Mathematical operations
+- Statistical transformations
 
-### Null Handling Strategies
-```python
-{
-  "type": "null_fill_smart",
-  "params": {
-    "method": "group_median",  # Fill with group median
-    "group_by": "department"
-  }
-}
-```
+### Text Transforms
+- Case conversion
+- String extraction
+- Length and character counts
+- Email/URL parsing
 
-## 🧪 Testing
-
-```bash
-# Install test dependencies
-pip install pytest pytest-cov httpx
-
-# Run tests
-pytest tests/ -v
-
-# With coverage
-pytest tests/ --cov=. --cov-report=html
-```
-
-## 📊 Performance
-
-- **Transform Execution**: < 500ms for 100K rows
-- **Caching**: 10x faster for repeated operations
-- **Memory**: < 2x original dataframe size
-- **Concurrent Transforms**: Up to 5 per query
-
-## 🔐 Security
-
-- Session-based isolation
-- Input validation on all endpoints
-- SQL injection protection (no raw SQL)
-- File size limits on upload
-
-## 🚧 Roadmap
-
-- [ ] Add more ML transforms (PCA, feature engineering)
-- [ ] Support for time series analysis
-- [ ] Real-time streaming transforms
-- [ ] Multi-table joins
-- [ ] Export transformed data
-- [ ] Transform history and undo
-
-## 📝 License
-
-MIT License
+### Categorical Transforms
+- Encoding (one-hot, label, frequency)
+- Grouping and consolidation
+- Top-N selection
 
 ## 🤝 Contributing
 
-Contributions welcome! Please submit PRs with:
-1. New transformer classes in appropriate file
-2. Registration in `registry.py`
-3. Unit tests
-4. Documentation updates
+Pull requests are welcome! For major changes, please open an issue first.
 
-## 💬 Support
+## 📄 License
 
-For issues or questions, please open a GitHub issue.
+MIT License
 
----
+## 👥 Authors
 
-**Version**: 2.0.0  
-**Last Updated**: December 2024
+Your Name - [GitHub Profile](https://github.com/YOUR_USERNAME)
+
+## 🐛 Known Issues
+
+- Session data is stored in memory (resets on server restart)
+- For production, implement persistent storage
+
+## 🗺️ Roadmap
+
+- [ ] Add database persistence
+- [ ] Implement user authentication
+- [ ] Add more ML algorithms
+- [ ] Create data visualization endpoints
+- [ ] Add data export functionality
