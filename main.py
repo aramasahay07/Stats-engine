@@ -7,7 +7,7 @@ from io import BytesIO
 import pandas as pd
 import numpy as np
 from scipy import stats
-# import statsmodels.api as sm  # COMMENTED OUT - not available
+import statsmodels.api as sm
 
 # ---------------------------------------------------
 # FastAPI app setup
@@ -277,40 +277,45 @@ def _auto_tests(df: pd.DataFrame, profile: ProfileResponse) -> List[TestResult]:
 
 def _auto_regression(df: pd.DataFrame, profile: ProfileResponse) -> Optional[RegressionResult]:
     """
-    DISABLED: Regression requires statsmodels which is not installed.
-    Return None to indicate regression is not available.
+    Run a simple OLS regression using statsmodels.
+
+    - Uses the first numeric column as the target (y)
+    - Uses the remaining numeric columns as predictors (X)
+    - Returns R², adjusted R², and coefficients.
     """
-    return None
-    
-    # Original code commented out:
-    # numeric_cols = [c.name for c in profile.columns if c.role == "numeric"]
-    # if len(numeric_cols) < 2:
-    #     return None
-    # 
-    # target = numeric_cols[0]
-    # predictors = numeric_cols[1:]
-    # 
-    # data = df[numeric_cols].dropna()
-    # if len(data) < 10:
-    #     return None
-    # 
-    # y = data[target]
-    # X = data[predictors]
-    # X = sm.add_constant(X)
-    # 
-    # try:
-    #     model = sm.OLS(y, X).fit()
-    # except Exception:
-    #     return None
-    # 
-    # coeffs = {name: float(val) for name, val in model.params.items()}
-    # return RegressionResult(
-    #     target=target,
-    #     predictors=predictors,
-    #     r_squared=float(model.rsquared),
-    #     adj_r_squared=float(model.rsquared_adj),
-    #     coefficients=coeffs,
-    # )
+    # Pick numeric columns from the profile
+    numeric_cols = [c.name for c in profile.columns if c.role == "numeric"]
+    if len(numeric_cols) < 2:
+        return None
+
+    target = numeric_cols[0]
+    predictors = numeric_cols[1:]
+
+    # Drop rows with missing values
+    data = df[numeric_cols].dropna()
+    if len(data) < 10:
+        # Too few rows to run a meaningful regression
+        return None
+
+    y = data[target]
+    X = data[predictors]
+    X = sm.add_constant(X)
+
+    try:
+        model = sm.OLS(y, X).fit()
+    except Exception:
+        # Fail soft: if anything goes wrong, skip regression
+        return None
+
+    coeffs = {name: float(val) for name, val in model.params.items()}
+
+    return RegressionResult(
+        target=target,
+        predictors=predictors,
+        r_squared=float(model.rsquared),
+        adj_r_squared=float(model.rsquared_adj),
+        coefficients=coeffs,
+    )
 
 
 # ---------------------------------------------------
@@ -353,7 +358,7 @@ async def run_analysis(session_id: str):
     profile = _build_profile(df, session_id)
     correlation = _build_correlation(df)
     tests = _auto_tests(df, profile)
-    regression = _auto_regression(df, profile)  # Will return None
+    regression = _auto_regression(df, profile)
 
     return AnalysisResponse(
         session_id=session_id,
