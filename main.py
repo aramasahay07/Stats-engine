@@ -401,17 +401,13 @@ def _calculate_process_capability(data: pd.Series, usl: float, lsl: float, targe
 def health_check():
     return {"status": "ok", "version": "4.0.0", "capabilities": "Complete Minitab-level", "transforms": TRANSFORMS_AVAILABLE}
 
-@app.post("/upload", response_model=ProfileResponse)
-async def upload_file(file: UploadFile = File(...)):
-    df = _load_dataframe(file).dropna(axis=1, how="all")
-    session_id = str(uuid4())
-    SESSIONS[session_id] = df
-    return _build_profile(df, session_id)
+# NOTE: /upload endpoint is in Part 3 (with sample_rows support)
+# DO NOT add @app.post("/upload") here - it's been moved to Part 3
 
 @app.get("/analysis/{session_id}", response_model=AnalysisResponse)
 async def run_analysis(session_id: str, correlation_method: str = "pearson"):
     df = SESSIONS.get(session_id)
-    if not df is not None:
+    if df is None:  # FIXED: Was "if not df is not None" (double negative)
         raise HTTPException(404, "Session not found")
     profile = _build_profile(df, session_id)
     normality_tests = []
@@ -531,3 +527,254 @@ async def delete_session(session_id: str):
 @app.get("/")
 def root():
     return {"name": "AI Data Lab", "version": "4.0.0", "docs": "/docs", "capabilities": ["Descriptive Stats", "Correlation", "Hypothesis Tests", "Normality Tests", "Variance Tests", "Full Regression Diagnostics", "Control Charts (X-bar, I, P)", "Process Capability (Cp, Cpk, Pp, Ppk, Cpm)", "Time Series", "PCA", "Clustering", "Tukey HSD", "Transforms (60+)" if TRANSFORMS_AVAILABLE else "Transforms (not loaded)"], "transforms": TRANSFORMS_AVAILABLE}
+# =============================================================================
+# MISSING ENDPOINTS FOR FRONTEND COMPATIBILITY
+# Add these AFTER Part 2, BEFORE the final root() endpoint
+# =============================================================================
+
+# Additional Pydantic Models for Query Endpoint
+class QueryRequest(BaseModel):
+    operation: Literal["aggregate", "filter", "distinct", "crosstab", "describe"]
+    group_by: Optional[List[str]] = None
+    metrics: Optional[List[Dict[str, str]]] = None  # [{"column": "x", "agg": "mean"}]
+    aggregations: Optional[Dict[str, str]] = None  # {"total_sales": "sales:sum"} format
+    filters: Optional[List[Dict[str, Any]]] = None
+    limit: Optional[int] = None
+
+class QueryResponse(BaseModel):
+    success: bool
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+@app.get("/sample/{session_id}")
+async def get_sample(session_id: str, max_rows: int = 100):
+    """Return sample rows from dataset for UI preview"""
+    df = SESSIONS.get(session_id)
+    if df is None:
+        raise HTTPException(404, "Session not found")
+    
+    # Get sample and convert NaN to None for JSON serialization
+    sample_df = df.head(max_rows)
+    sample_rows = sample_df.replace({np.nan: None, pd.NaT: None}).to_dict(orient="records")
+    
+    return {
+        "session_id": session_id,
+        "sample_rows": sample_rows,
+        "total_rows": len(df),
+        "returned_rows": len(sample_rows)
+    }
+
+@app.get("/schema/{session_id}")
+async def get_schema(session_id: str):
+    """Return column schema for a session"""
+    df = SESSIONS.get(session_id)
+    if df is None:
+        raise HTTPException(404, "Session not found")
+    
+    schema = []
+    missing_summary = {}
+    
+    for col in df.columns:
+        s = df[col]
+        role = _infer_role(s)
+        missing_pct = float(s.isna().mean() * 100)
+        missing_summary[col] = round(missing_pct, 2)
+        
+        schema.append({
+            "name": col,
+            "dtype": str(s.dtype),
+            "role": role,
+            "missing_pct": round(missing_pct, 2),
+            "unique_count": int(s.nunique())
+        })
+    
+    return {
+        "session_id": session_id,
+        "n_rows": len(df),
+        "n_cols": len(df.columns),
+        "schema": schema,
+        "missing_summary": missing_summary
+    }
+
+@app.post("/query/{session_id}", response_model=QueryResponse)
+async def query_dataset(session_id: str, request: QueryRequest):
+    """
+    Execute aggregation/filter queries on the dataset.
+    CRITICAL for AI chat and chart generation in frontend.
+    """
+    df = SESSIONS.get(session_id)
+    if df is None:
+        raise HTTPException(404, "Session not found")
+    
+    try:
+        result_df = df.copy()
+        
+        # Apply filters first
+        if request.filters:
+            for f in request.filters:
+                col = f.get("column")
+                op = f.get("op") or f.get("operator", "==")
+                val = f.get("value")
+                
+                if col not in result_df.columns:
+                    continue
+                
+                if op == "==" or op == "eq":
+                    result_df = result_df[result_df[col] == val]
+                elif op == "!=" or op == "ne":
+                    result_df = result_df[result_df[col] != val]
+                elif op == ">" or op == "gt":
+                    result_df = result_df[result_df[col] > val]
+                elif op == "<" or op == "lt":
+                    result_df = result_df[result_df[col] < val]
+                elif op == ">=" or op == "gte":
+                    result_df = result_df[result_df[col] >= val]
+                elif op == "<=" or op == "lte":
+                    result_df = result_df[result_df[col] <= val]
+                elif op == "in":
+                    result_df = result_df[result_df[col].isin(val if isinstance(val, list) else [val])]
+                elif op == "not_in":
+                    result_df = result_df[~result_df[col].isin(val if isinstance(val, list) else [val])]
+                elif op == "contains":
+                    result_df = result_df[result_df[col].astype(str).str.contains(str(val), case=False, na=False)]
+                elif op == "starts_with":
+                    result_df = result_df[result_df[col].astype(str).str.startswith(str(val), na=False)]
+        
+        # Handle different operations
+        if request.operation == "aggregate":
+            if request.group_by:
+                # Handle aggregations - support both formats
+                agg_dict = {}
+                
+                # Format 1: metrics list [{"column": "x", "agg": "mean"}]
+                if request.metrics:
+                    for m in request.metrics:
+                        col = m.get("column")
+                        agg = m.get("agg", "count")
+                        
+                        if col == "*" or agg == "count":
+                            agg_dict["count"] = (result_df.columns[0], "size")
+                        elif col in result_df.columns:
+                            agg_dict[f"{col}_{agg}"] = (col, agg)
+                
+                # Format 2: aggregations dict {"total_sales": "sales:sum"}
+                if request.aggregations:
+                    for alias, spec in request.aggregations.items():
+                        if ":" in spec:
+                            col, agg = spec.split(":", 1)
+                            if col == "*" or agg == "count":
+                                agg_dict[alias] = (result_df.columns[0], "size")
+                            elif col in result_df.columns:
+                                agg_dict[alias] = (col, agg)
+                
+                # If no aggregations specified, default to count
+                if not agg_dict:
+                    agg_dict["count"] = (result_df.columns[0], "size")
+                
+                # Perform groupby
+                result_df = result_df.groupby(request.group_by, as_index=False).agg(**agg_dict)
+            else:
+                # Aggregate without grouping (overall stats)
+                agg_result = {}
+                if request.metrics:
+                    for m in request.metrics:
+                        col = m.get("column")
+                        agg = m.get("agg", "count")
+                        if col in result_df.columns:
+                            if agg == "mean":
+                                agg_result[f"{col}_mean"] = float(result_df[col].mean())
+                            elif agg == "sum":
+                                agg_result[f"{col}_sum"] = float(result_df[col].sum())
+                            elif agg == "count":
+                                agg_result[f"{col}_count"] = int(result_df[col].count())
+                            elif agg == "min":
+                                agg_result[f"{col}_min"] = float(result_df[col].min())
+                            elif agg == "max":
+                                agg_result[f"{col}_max"] = float(result_df[col].max())
+                            elif agg == "std":
+                                agg_result[f"{col}_std"] = float(result_df[col].std())
+                
+                return QueryResponse(success=True, result={"data": [agg_result], "columns": list(agg_result.keys()), "row_count": 1})
+        
+        elif request.operation == "distinct":
+            if request.group_by:
+                result_df = result_df[request.group_by].drop_duplicates()
+            else:
+                result_df = result_df.drop_duplicates()
+        
+        elif request.operation == "describe":
+            desc = result_df.describe(include='all').to_dict()
+            return QueryResponse(success=True, result={"data": desc, "columns": list(desc.keys()), "row_count": len(desc)})
+        
+        elif request.operation == "crosstab":
+            if request.group_by and len(request.group_by) >= 2:
+                # Create crosstab
+                index_col = request.group_by[0]
+                column_col = request.group_by[1]
+                
+                # Get value column from metrics or use count
+                value_col = None
+                agg_func = "count"
+                if request.metrics and len(request.metrics) > 0:
+                    value_col = request.metrics[0].get("column")
+                    agg_func = request.metrics[0].get("agg", "count")
+                
+                if value_col and value_col in result_df.columns:
+                    crosstab = pd.crosstab(
+                        result_df[index_col],
+                        result_df[column_col],
+                        values=result_df[value_col],
+                        aggfunc=agg_func
+                    )
+                else:
+                    crosstab = pd.crosstab(result_df[index_col], result_df[column_col])
+                
+                # Convert to records format
+                crosstab_reset = crosstab.reset_index()
+                result_df = crosstab_reset
+        
+        # Apply limit
+        if request.limit and request.limit > 0:
+            result_df = result_df.head(request.limit)
+        
+        # Convert to JSON-safe format
+        result_df = result_df.replace({np.nan: None, pd.NaT: None, np.inf: None, -np.inf: None})
+        
+        # Convert result to records
+        result_data = result_df.to_dict(orient="records")
+        
+        return QueryResponse(
+            success=True,
+            result={
+                "data": result_data,
+                "columns": list(result_df.columns),
+                "row_count": len(result_data)
+            }
+        )
+    
+    except Exception as e:
+        return QueryResponse(success=False, error=str(e))
+
+# =============================================================================
+# UPDATE THE /upload ENDPOINT TO INCLUDE sample_rows
+# Replace the existing @app.post("/upload") with this version:
+# =============================================================================
+
+@app.post("/upload", response_model=ProfileResponse)
+async def upload_file_with_sample(file: UploadFile = File(...)):
+    """Upload file with sample rows included in response"""
+    df = _load_dataframe(file).dropna(axis=1, how="all")
+    session_id = str(uuid4())
+    SESSIONS[session_id] = df
+    
+    # Get profile
+    profile = _build_profile(df, session_id)
+    
+    # Add sample rows to response
+    sample_rows = df.head(100).replace({np.nan: None, pd.NaT: None}).to_dict(orient="records")
+    
+    # Create response dict and add sample_rows
+    profile_dict = profile.dict()
+    profile_dict["sample_rows"] = sample_rows
+    
+    return profile_dict
