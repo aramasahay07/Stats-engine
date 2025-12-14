@@ -1,10 +1,21 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.3
-python-multipart==0.0.9
-pandas==2.2.3
-numpy==1.26.4
+# Core API Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+openpyxl==3.1.2
+
+# Statistical Analysis
 scipy==1.11.4
 statsmodels==0.14.1
-scikit-learn==1.4.2
-openpyxl==3.1.5
-pydantic==2.9.2
+scikit-learn==1.4.0
+
+# Validation & Models
+pydantic==2.5.3
+
+# Optional - For enhanced features
+python-dateutil==2.8.2
+pytz==2023.3
