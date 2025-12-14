@@ -37,6 +37,7 @@ class ProfileResponse(BaseModel):
     columns: List[ColumnInfo]
     schema: List[ColumnInfo]  # Alias for frontend compatibility
     descriptives: List[DescriptiveStats]
+    sample_rows: Optional[List[Dict[str, Any]]] = None  # For frontend data preview
 
 
 # ---------------------------------------------------

@@ -120,6 +120,9 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
                 )
             )
 
+    # Generate sample rows for frontend data preview (first 100 rows)
+    sample_rows = df.head(100).replace({np.nan: None}).to_dict(orient='records')
+
     return ProfileResponse(
         session_id=session_id,
         n_rows=int(len(df)),
@@ -127,6 +130,7 @@ def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
         columns=cols,
         schema=cols,
         descriptives=descriptives,
+        sample_rows=sample_rows,
     )
 
 
