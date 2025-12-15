@@ -1,0 +1,26 @@
+# AI Data Lab - Python Backend Requirements
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# CORS
+python-jose[cryptography]==3.3.0
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+openpyxl==3.1.2  # For Excel files
+
+# Statistics & ML
+scipy==1.11.4
+scikit-learn==1.4.0
+statsmodels==0.14.1
+
+# Type Hints
+pydantic==2.5.3
+typing-extensions==4.9.0
+
+# Optional: For better performance
+python-dotenv==1.0.0
