@@ -23,6 +23,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
+from ai_agent.router import create_agent_router
 
 # Transform engine imports
 try:
@@ -67,6 +68,14 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------
+# Agent Routes (NEW)
+# ---------------------------------------------------
+app.include_router(
+    create_agent_router(_get_df),
+    prefix="/agents"
+)
+
+# ---------------------------------------------------
 # Data Storage
 # ---------------------------------------------------
 # Use SessionStore if available, otherwise fallback to dict
@@ -75,6 +84,8 @@ if TRANSFORM_SERVICE_AVAILABLE:
     transform_service = TransformService()
 else:
     SESSIONS: Dict[str, pd.DataFrame] = {}
+    def _get_df(session_id: str):
+    return SESSIONS.get(session_id)
 
 # ---------------------------------------------------
 # Pydantic Models - Statistical Analysis
