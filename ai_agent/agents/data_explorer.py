@@ -4,7 +4,7 @@ Data Explorer Agent - Profiles data and assesses quality
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List
-from core.orchestrator import BaseAgent, AgentRole
+from ai_agent.core.orchestrator import BaseAgent, AgentRole
 
 
 class DataExplorerAgent(BaseAgent):

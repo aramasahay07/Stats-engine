@@ -6,10 +6,10 @@ import pandas as pd
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from agents.data_explorer import DataExplorerAgent
-from agents.pattern_detective import PatternDetectiveAgent
-from agents.causal_reasoner import CausalReasonerAgent
-from core.orchestrator import AgentRole
+from ai_agent.agents.data_explorer import DataExplorerAgent
+from ai_agent.agents.pattern_detective import PatternDetectiveAgent
+from ai_agent.agents.causal_reasoner import CausalReasonerAgent
+from ai_agent.core.orchestrator import AgentRole
 
 
 class AgentEndpoints:

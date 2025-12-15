@@ -6,7 +6,7 @@ import numpy as np
 from typing import Dict, Any, List
 from sklearn.linear_model import LinearRegression
 from scipy import stats
-from core.orchestrator import BaseAgent, AgentRole
+from ai_agent.core.orchestrator import BaseAgent, AgentRole
 
 
 class CausalReasonerAgent(BaseAgent):

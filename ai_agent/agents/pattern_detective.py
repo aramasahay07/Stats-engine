@@ -9,7 +9,7 @@ from sklearn.cluster import KMeans, DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 from sklearn.ensemble import IsolationForest
-from core.orchestrator import BaseAgent, AgentRole
+from ai_agent.core.orchestrator import BaseAgent, AgentRole
 
 
 class PatternDetectiveAgent(BaseAgent):
