@@ -67,13 +67,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------
-# Agent Routes (NEW)
-# ---------------------------------------------------
-app.include_router(
-    create_agent_router(_get_df),
-    prefix="/agents"
-)
 
 # ---------------------------------------------------
 # Data Storage
@@ -84,8 +77,19 @@ if TRANSFORM_SERVICE_AVAILABLE:
     transform_service = TransformService()
 else:
     SESSIONS: Dict[str, pd.DataFrame] = {}
-    def _get_df(session_id: str):
+
+def _get_df(session_id: str):
+    if TRANSFORM_SERVICE_AVAILABLE:
+        return session_store.get(session_id)
     return SESSIONS.get(session_id)
+
+# ---------------------------------------------------
+# Agent Routes (NEW)
+# ---------------------------------------------------
+app.include_router(
+    create_agent_router(_get_df),
+    prefix="/agents"
+)
 
 # ---------------------------------------------------
 # Pydantic Models - Statistical Analysis
