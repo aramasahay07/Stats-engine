@@ -6,6 +6,7 @@ Combines v4.0 Minitab-level stats with v2.0 Transform capabilities
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from routers.kb import router as kb_router
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Literal
@@ -65,6 +66,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+app.include_router(
+    kb_router,
+    prefix="/kb",
+    tags=["Knowledge Base"]
 )
 
 
@@ -968,6 +975,9 @@ def health_check():
         }
     }
 
+@app.get("/healthz")
+def healthz():
+    return health_check()
 
 @app.get("/")
 def root():
@@ -1979,6 +1989,10 @@ def export_data(session_id: str, format: str = "csv"):
 # ===================================================
 @app.on_event("startup")
 async def startup_event():
+    import os
+
+    port = os.getenv("PORT", "8000")
+
     print("=" * 70)
     print("🚀 AI Data Lab v5.0 - Complete Analytics Platform")
     print("=" * 70)
@@ -1989,10 +2003,11 @@ async def startup_event():
     print(f"  {'✅' if TRANSFORMS_AVAILABLE else '❌'} Transform Engine (60+ transforms)")
     print(f"  {'✅' if TRANSFORM_SERVICE_AVAILABLE else '❌'} Table Operations (group, pivot, merge)")
     print("=" * 70)
-    print("📚 API Docs: http://localhost:8000/docs")
+    print(f"📚 API Docs: http://0.0.0.0:{port}/docs")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os, uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
