@@ -13,7 +13,6 @@ from typing import List, Dict, Optional, Any, Literal
 from uuid import uuid4
 from io import BytesIO, StringIO
 import pandas as pd
-from fastapi.encoders import jsonable_encoder
 import numpy as np
 from scipy import stats
 from scipy.stats import shapiro, anderson, levene, bartlett, mannwhitneyu, kruskal
@@ -453,6 +452,44 @@ def _build_correlation(df: pd.DataFrame, method: str = "pearson") -> Optional[Co
 
 
 # ---------------------------------------------------
+# Utility Functions - JSON Safety
+# ---------------------------------------------------
+def _to_jsonable(obj: Any) -> Any:
+    """Recursively convert numpy/pandas/pydantic objects into JSON-serializable Python types."""
+
+    # Pydantic models (v2)
+    if hasattr(obj, "model_dump"):
+        try:
+            obj = obj.model_dump()
+        except Exception:
+            pass
+
+    # NumPy scalars (includes numpy.bool_)
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    # NumPy arrays
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # Pandas missing values / timestamps
+    try:
+        if obj is pd.NA or obj is pd.NaT:
+            return None
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+    except Exception:
+        pass
+
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(v) for v in obj]
+
+    return obj
+
+
+# ---------------------------------------------------
 # Utility Functions - Statistical Tests
 # ---------------------------------------------------
 def _normality_tests(series: pd.Series) -> List[NormalityTest]:
@@ -470,7 +507,7 @@ def _normality_tests(series: pd.Series) -> List[NormalityTest]:
             test_name="Shapiro-Wilk",
             statistic=float(stat),
             p_value=float(p),
-            is_normal=bool(p > 0.05),
+            is_normal=p > 0.05,
             interpretation=f"Data {'appears' if p > 0.05 else 'does not appear'} normally distributed (p={p:.4f})"
         ))
     except Exception:
@@ -483,7 +520,7 @@ def _normality_tests(series: pd.Series) -> List[NormalityTest]:
             test_name="Anderson-Darling",
             statistic=float(result.statistic),
             p_value=0.0,  # Anderson doesn't return p-value directly
-            is_normal=bool(result.statistic < result.critical_values[2]),
+            is_normal=result.statistic < result.critical_values[2],
             interpretation=f"Test statistic: {result.statistic:.4f}, Critical value (5%): {result.critical_values[2]:.4f}"
         ))
     except Exception:
@@ -624,7 +661,7 @@ def _calculate_regression_diagnostics(model, X, y) -> Dict[str, Any]:
             'breusch_pagan': {
                 'statistic': float(bp_test[0]),
                 'p_value': float(bp_test[1]),
-                'heteroscedastic': bp_test[1] < 0.05
+                'heteroscedastic': bool(bp_test[1] < 0.05)
             }
         }
     except Exception:
@@ -1041,18 +1078,24 @@ async def run_analysis(session_id: str):
     """
     df = _get_session(session_id)
     profile = _build_profile(df, session_id)
-
+    
     correlation = _build_correlation(df)
     tests = _auto_tests(df, profile)
     regression = _auto_regression(df, profile)
-
+    
     # Run normality tests on numeric columns
     normality_tests = []
     numeric_cols = [c.name for c in profile.columns if c.role == "numeric"]
     for col in numeric_cols[:3]:  # Limit to first 3 numeric columns
         normality_tests.extend(_normality_tests(df[col]))
+    
+    # Ensure JSON-safe (no numpy.bool_ or other numpy scalars)
+    correlation = _to_jsonable(correlation)
+    tests = _to_jsonable(tests)
+    regression = _to_jsonable(regression)
+    normality_tests = _to_jsonable(normality_tests)
 
-    analysis = AnalysisResponse(
+    return AnalysisResponse(
         session_id=session_id,
         correlation=correlation,
         tests=tests,
@@ -1060,14 +1103,6 @@ async def run_analysis(session_id: str):
         normality_tests=normality_tests
     )
 
-    return jsonable_encoder(
-        analysis,
-        custom_encoder={
-            np.bool_: bool,
-            np.generic: lambda x: x.item(),
-            np.ndarray: lambda x: x.tolist(),
-        },
-    )
 
 @app.post("/advanced-analysis/{session_id}", response_model=AdvancedAnalysisResponse)
 async def advanced_analysis(session_id: str, request: AdvancedAnalysisRequest):
@@ -1112,13 +1147,13 @@ async def advanced_analysis(session_id: str, request: AdvancedAnalysisRequest):
             "levene": {
                 "statistic": float(stat_levene),
                 "p_value": float(p_levene),
-                "equal_variance": p_levene > 0.05,
+                "equal_variance": bool(p_levene > 0.05),
                 "interpretation": f"Variances {'appear' if p_levene > 0.05 else 'do not appear'} equal (robust test)"
             },
             "bartlett": {
                 "statistic": float(stat_bartlett),
                 "p_value": float(p_bartlett),
-                "equal_variance": p_bartlett > 0.05,
+                "equal_variance": bool(p_bartlett > 0.05),
                 "interpretation": f"Variances {'appear' if p_bartlett > 0.05 else 'do not appear'} equal (assumes normality)"
             }
         }
