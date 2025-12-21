@@ -6,7 +6,7 @@ Combines v4.0 Minitab-level stats with v2.0 Transform capabilities
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from routers.kb import router as kb_router
+from knowledge.routers.kb import router as kb_router
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Literal
