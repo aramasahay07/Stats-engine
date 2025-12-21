@@ -469,7 +469,7 @@ def _normality_tests(series: pd.Series) -> List[NormalityTest]:
             test_name="Shapiro-Wilk",
             statistic=float(stat),
             p_value=float(p),
-            is_normal=p > 0.05,
+            is_normal=bool(p > 0.05),
             interpretation=f"Data {'appears' if p > 0.05 else 'does not appear'} normally distributed (p={p:.4f})"
         ))
     except Exception:
@@ -482,7 +482,7 @@ def _normality_tests(series: pd.Series) -> List[NormalityTest]:
             test_name="Anderson-Darling",
             statistic=float(result.statistic),
             p_value=0.0,  # Anderson doesn't return p-value directly
-            is_normal=result.statistic < result.critical_values[2],
+            is_normal=bool(result.statistic < result.critical_values[2]),
             interpretation=f"Test statistic: {result.statistic:.4f}, Critical value (5%): {result.critical_values[2]:.4f}"
         ))
     except Exception:
