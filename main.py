@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Any, Literal
 from uuid import uuid4
 from io import BytesIO, StringIO
 import pandas as pd
+from fastapi.encoders import jsonable_encoder
 import numpy as np
 from scipy import stats
 from scipy.stats import shapiro, anderson, levene, bartlett, mannwhitneyu, kruskal
@@ -1040,18 +1041,18 @@ async def run_analysis(session_id: str):
     """
     df = _get_session(session_id)
     profile = _build_profile(df, session_id)
-    
+
     correlation = _build_correlation(df)
     tests = _auto_tests(df, profile)
     regression = _auto_regression(df, profile)
-    
+
     # Run normality tests on numeric columns
     normality_tests = []
     numeric_cols = [c.name for c in profile.columns if c.role == "numeric"]
     for col in numeric_cols[:3]:  # Limit to first 3 numeric columns
         normality_tests.extend(_normality_tests(df[col]))
-    
-    return AnalysisResponse(
+
+    analysis = AnalysisResponse(
         session_id=session_id,
         correlation=correlation,
         tests=tests,
@@ -1059,6 +1060,14 @@ async def run_analysis(session_id: str):
         normality_tests=normality_tests
     )
 
+    return jsonable_encoder(
+        analysis,
+        custom_encoder={
+            np.bool_: bool,
+            np.generic: lambda x: x.item(),
+            np.ndarray: lambda x: x.tolist(),
+        },
+    )
 
 @app.post("/advanced-analysis/{session_id}", response_model=AdvancedAnalysisResponse)
 async def advanced_analysis(session_id: str, request: AdvancedAnalysisRequest):
