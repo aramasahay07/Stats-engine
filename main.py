@@ -26,6 +26,18 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from ai_agent.router import create_agent_router
 
+# --- DuckDB durable dataset layer (NEW) ---
+# Adds permanent dataset_id + Parquet persistence, plus /datasets/* endpoints
+try:
+    from app.routers.datasets import router as datasets_router
+    from app.routers.query import router as duckdb_query_router
+    from app.routers.stats import router as duckdb_stats_router
+    DUCKDB_LAYER_AVAILABLE = True
+except Exception as _e:
+    DUCKDB_LAYER_AVAILABLE = False
+    print(f"⚠️  Warning: DuckDB dataset layer not available: {_e}")
+
+
 # Transform engine imports
 try:
     from transformers.registry import registry
@@ -74,6 +86,14 @@ app.include_router(
     tags=["Knowledge Base"]
 )
 
+
+
+
+# --- DuckDB durable dataset layer (NEW) ---
+if DUCKDB_LAYER_AVAILABLE:
+    app.include_router(datasets_router)
+    app.include_router(duckdb_query_router)
+    app.include_router(duckdb_stats_router)
 
 # ---------------------------------------------------
 # Data Storage
@@ -1062,6 +1082,49 @@ async def upload_file(file: UploadFile = File(...)):
     
     profile = _build_profile(df, session_id)
     return profile
+
+
+# ===================================================
+# API ENDPOINTS - DuckDB Dataset Compatibility Helpers
+# ===================================================
+if DUCKDB_LAYER_AVAILABLE:
+    @app.post("/rehydrate/dataset/{dataset_id}", response_model=ProfileResponse)
+    async def rehydrate_dataset_to_session(dataset_id: str, user_id: str):
+        """Create a short-lived session_id from a permanent dataset_id.
+
+        Use this only if your existing frontend/edge still expects session_id-based endpoints
+        (/analysis/{session_id}, /query/{session_id}, transforms, etc.).
+
+        New flow should prefer /datasets/{dataset_id}/query and /datasets/{dataset_id}/stats.
+        """
+        from pathlib import Path
+        from app.services.cache_paths import CachePaths
+        from app.services.storage_client import SupabaseStorageClient
+        from app.services.dataset_registry import DatasetRegistry
+        import pandas as pd
+
+        registry = DatasetRegistry()
+        ds = registry.get(dataset_id, user_id)
+        if not ds:
+            raise HTTPException(404, "Dataset not found")
+
+        parquet_ref = ds.get("parquet_ref")
+        if not parquet_ref:
+            raise HTTPException(400, "Dataset missing parquet_ref")
+
+        cache = CachePaths(base_dir=Path("./cache"))
+        parquet_path = cache.parquet_path(user_id, dataset_id)
+        if not parquet_path.exists():
+            storage = SupabaseStorageClient()
+            storage.download_file(parquet_ref, parquet_path)
+
+        df = pd.read_parquet(parquet_path)
+        df = df.dropna(axis=1, how="all")
+
+        session_id = str(uuid4())
+        _set_session(session_id, df, metadata={"dataset_id": dataset_id, "source": "duckdb_parquet"})
+        return _build_profile(df, session_id)
+
 
 
 # ===================================================
