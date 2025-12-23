@@ -104,7 +104,8 @@ class DuckDBManager:
         with self.connect() as con:
             con.execute("PRAGMA enable_object_cache")  # safe hint
             con.execute("PRAGMA threads=" + str(int(self.threads)))
-            con.execute("CREATE TEMP VIEW ds AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
+            path_sql = str(parquet_path).replace("'", "''")
+            con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
             rel = con.execute(sql, params or [])
             cols = [c[0] for c in rel.description]
             rows = rel.fetchall()
@@ -112,7 +113,8 @@ class DuckDBManager:
 
     def profile_parquet(self, parquet_path: Path, sample_n: int = 100) -> Dict[str, Any]:
         with self.connect() as con:
-            con.execute("CREATE TEMP VIEW ds AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
+            path_sql = str(parquet_path).replace("'", "''")
+            con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
             n_rows = con.execute("SELECT COUNT(*) FROM ds").fetchone()[0]
             schema = con.execute("DESCRIBE ds").fetchall()
             # missing summary: count nulls per column (works for many types)

@@ -17,7 +17,8 @@ router = APIRouter(prefix="/datasets", tags=["stats"])
 def _fetch_columns(parquet_path: Path, cols: List[str], filters_sql: str = "", params: List[Any] | None = None) -> Dict[str, np.ndarray]:
     duck = DuckDBManager()
     with duck.connect() as con:
-        con.execute("CREATE TEMP VIEW ds AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
+        path_sql = str(parquet_path).replace("'", "''")
+        con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
         sel = ", ".join([f"{c}" for c in cols])
         q = f"SELECT {sel} FROM ds {filters_sql}"
         df = con.execute(q, params or []).fetchdf()
@@ -48,7 +49,8 @@ def run_stats(dataset_id: str, user_id: str, spec: StatsSpec):
     if analysis == "descriptives":
         duck = DuckDBManager()
         with duck.connect() as con:
-            con.execute("CREATE TEMP VIEW ds AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
+            path_sql = str(parquet_path).replace("'", "''")
+            con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
             res = con.execute("SELECT COUNT(*) AS n FROM ds").fetchone()[0]
         return {"analysis": "descriptives", "n": int(res)}
 
@@ -99,7 +101,8 @@ def run_stats(dataset_id: str, user_id: str, spec: StatsSpec):
         p = RegressionSpec.model_validate(spec.params)
         duck = DuckDBManager()
         with duck.connect() as con:
-            con.execute("CREATE TEMP VIEW ds AS SELECT * FROM read_parquet(?)", [str(parquet_path)])
+            path_sql = str(parquet_path).replace("'", "''")
+            con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
             cols = [p.y] + p.x
             sel = ", ".join(cols)
             df = con.execute(f"SELECT {sel} FROM ds").fetchdf().dropna()
