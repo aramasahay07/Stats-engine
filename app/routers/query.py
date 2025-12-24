@@ -23,37 +23,35 @@ class SQLQueryRequest(BaseModel):
 
 
 def _has_placeholder_string(spec: QuerySpec) -> bool:
-    """Detect Swagger/OpenAPI example placeholder values like 'string'.
-
-    These placeholders commonly sneak into requests and then DuckDB fails with BinderError
-    because a column named 'string' doesn't exist.
-    """
-    if getattr(spec, "select", None) and any(s == "string" for s in spec.select or []):
+    """Detect Swagger/OpenAPI example placeholder values like 'string'."""
+    if getattr(spec, "select", None) and any(s == "string" for s in (spec.select or [])):
         return True
-    if getattr(spec, "groupby", None) and any(s == "string" for s in spec.groupby or []):
+    if getattr(spec, "groupby", None) and any(s == "string" for s in (spec.groupby or [])):
         return True
-    if getattr(spec, "order_by", None) and any(getattr(o, "col", None) == "string" for o in spec.order_by or []):
+    if getattr(spec, "order_by", None) and any(getattr(o, "col", None) == "string" for o in (spec.order_by or [])):
         return True
     if getattr(spec, "measures", None):
-        for m in spec.measures or []:
+        for m in (spec.measures or []):
             if getattr(m, "name", None) == "string" or getattr(m, "expr", None) == "string":
                 return True
     if getattr(spec, "filters", None):
-        for f in spec.filters or []:
+        for f in (spec.filters or []):
             if getattr(f, "col", None) == "string":
                 return True
     return False
 
 
 @router.post("/{dataset_id}/query", response_model=TableResult)
-def run_query(dataset_id: str, user_id: str, spec: Union[QuerySpec, SQLQueryRequest]):
-    # -----------------------------
+def run_query(
+    dataset_id: str,
+    user_id: str,
+    # IMPORTANT: SQLQueryRequest FIRST so {"sql": "..."} never gets parsed as QuerySpec
+    spec: Union[SQLQueryRequest, QuerySpec],
+):
     # 1) Validate request inputs
-    # -----------------------------
     if not user_id:
         raise HTTPException(status_code=422, detail="Missing required query param: user_id")
 
-    # If caller sent raw SQL, use it directly.
     raw_sql = getattr(spec, "sql", None) or getattr(spec, "query", None)
 
     # Only validate placeholder strings for structured QuerySpec (not raw SQL).
@@ -67,9 +65,7 @@ def run_query(dataset_id: str, user_id: str, spec: Union[QuerySpec, SQLQueryRequ
                 ),
             )
 
-    # -----------------------------
     # 2) Find dataset + parquet ref
-    # -----------------------------
     registry = DatasetRegistry()
     ds = registry.get(dataset_id, user_id)
     if not ds:
@@ -79,19 +75,14 @@ def run_query(dataset_id: str, user_id: str, spec: Union[QuerySpec, SQLQueryRequ
     if not parquet_ref:
         raise HTTPException(status_code=400, detail="Dataset missing parquet_ref")
 
-    # -----------------------------
-    # 3) Ensure parquet file exists locally (cache)
-    # -----------------------------
+    # 3) Ensure parquet exists locally
     cache = CachePaths(base_dir=Path("./cache"))
     parquet_path = cache.parquet_path(user_id, dataset_id)
-
     if not parquet_path.exists():
         storage = SupabaseStorageClient()
         storage.download_file(parquet_ref, parquet_path)
 
-    # -----------------------------
-    # 4) Execute query via DuckDB
-    # -----------------------------
+    # 4) Execute via DuckDB
     duck = DuckDBManager()
 
     # Mode A: Raw SQL
@@ -99,13 +90,10 @@ def run_query(dataset_id: str, user_id: str, spec: Union[QuerySpec, SQLQueryRequ
         # Allow users to write FROM dataset; internally our alias is "ds"
         sql = re.sub(r"\bdataset\b", "ds", raw_sql, flags=re.IGNORECASE)
         params = None
-
-    # Mode B: Structured QuerySpec
+    # Mode B: QuerySpec
     else:
-        # If this isn't raw SQL, it must be a QuerySpec
         if not isinstance(spec, QuerySpec):
             raise HTTPException(status_code=422, detail="Invalid request body")
-
         sql, params = duck.build_query_sql("ds", spec)
 
     try:
@@ -120,7 +108,6 @@ def run_query(dataset_id: str, user_id: str, spec: Union[QuerySpec, SQLQueryRequ
                     f"DuckDB error: {msg}"
                 ),
             )
-        raise  # keep unexpected failures as 500
+        raise
 
-    # IMPORTANT: Return ONLY the columns the query produced (no padding with nulls)
     return TableResult(columns=out["columns"], rows=[list(r) for r in out["rows"]])

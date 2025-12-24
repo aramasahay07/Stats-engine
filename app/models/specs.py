@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 # ---------------------------
 # Query Spec (Power BI style)
@@ -20,7 +20,10 @@ class OrderBySpec(BaseModel):
     dir: Literal["asc", "desc"] = "asc"
 
 class QuerySpec(BaseModel):
-    select: List[str] = Field(default_factory=list)      # columns to include (non-aggregated dims)
+    # IMPORTANT: stop Swagger/raw-SQL payloads from being silently treated as QuerySpec
+    model_config = ConfigDict(extra="forbid")
+
+    select: List[str] = Field(default_factory=list)
     measures: List[MeasureSpec] = Field(default_factory=list)
     filters: List[FilterSpec] = Field(default_factory=list)
     groupby: List[str] = Field(default_factory=list)
@@ -35,8 +38,8 @@ class TTestSpec(BaseModel):
     type: Literal["one_sample", "two_sample", "paired"] = "two_sample"
     x: str
     y: Optional[str] = None
-    group: Optional[str] = None   # categorical grouping col for two_sample (x numeric, group 2 levels)
-    mu: float = 0.0               # for one_sample
+    group: Optional[str] = None
+    mu: float = 0.0
     equal_var: bool = False
 
 class AnovaSpec(BaseModel):
