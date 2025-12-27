@@ -9,10 +9,8 @@ from pydantic import BaseModel, Field
 from scipy import stats
 
 from app.models.specs import StatsSpec, TTestSpec, AnovaSpec, RegressionSpec
-from app.services.dataset_registry import DatasetRegistry
-from app.services.storage_client import SupabaseStorageClient
-from app.services.cache_paths import CachePaths
 from app.services.duckdb_manager import DuckDBManager
+from app.services.parquet_loader import ensure_parquet_local
 
 router = APIRouter(prefix="/datasets", tags=["stats"])
 
@@ -39,33 +37,6 @@ class LegacyStatsRequest(BaseModel):
     analysis: LegacyAnalysisPayload
 
 
-# ----------------------------
-# Helper: Ensure parquet is local
-# ----------------------------
-def _ensure_parquet_local(dataset_id: str, user_id: str) -> Path:
-    """Download parquet file to local cache if not present"""
-    registry = DatasetRegistry()
-    ds = registry.get(dataset_id, user_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    parquet_ref = ds.get("parquet_ref")
-    if not parquet_ref:
-        raise HTTPException(status_code=400, detail="Dataset missing parquet_ref")
-
-    cache = CachePaths(base_dir=Path("./cache"))
-    parquet_path = cache.parquet_path(user_id, dataset_id)
-
-    if not parquet_path.exists():
-        storage = SupabaseStorageClient()
-        storage.download_file(parquet_ref, parquet_path)
-
-    return parquet_path
-
-
-# ----------------------------
-# Analysis: Descriptive Statistics
-# ----------------------------
 def _descriptives_duckdb(parquet_path: Path, columns: List[str]) -> Dict[str, Any]:
     """
     Compute descriptives using DuckDB with TRY_CAST so non-numeric cols won't crash.
@@ -145,7 +116,7 @@ def run_stats(
     dataset_id: str,
     user_id: str,
     body: Union[StatsSpec, LegacyStatsRequest, Dict[str, Any]],
-):
+) -> Dict[str, Any]:
     """
     Enhanced statistical analysis endpoint.
     
@@ -178,7 +149,7 @@ def run_stats(
     if not user_id:
         raise HTTPException(status_code=422, detail="Missing required query param: user_id")
 
-    parquet_path = _ensure_parquet_local(dataset_id, user_id)
+    parquet_path, _ds = ensure_parquet_local(dataset_id=dataset_id, user_id=user_id)
 
     # ----------------------------
     # Normalize request format
