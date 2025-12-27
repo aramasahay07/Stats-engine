@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from app.services.dataset_creator import create_dataset_from_upload
 from app.services.dataset_registry import DatasetRegistry
+from app.models.specs import DatasetCreateResponse
 
 # dY"1 Supabase client (adjust this import to match your project)
 # Example: create a module app/services/supabase_client.py that exposes `supabase`
