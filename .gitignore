@@ -46,6 +46,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Local data/cache artifacts
+data/
+cache/
+*.parquet
+*.duckdb
+
 # Test coverage
 .coverage
 htmlcov/
