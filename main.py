@@ -1,8 +1,8 @@
 """
-AI Data Lab Backend v5.0
-Complete Statistical Engine + Transform Engine
-Combines v4.0 Minitab-level stats with v2.0 Transform capabilities
+AI Data Lab Backend v6.0
+Router-only FastAPI entrypoint; business logic lives in routers/services.
 """
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,26 +38,28 @@ from app.services.session_dataset_bridge import SessionDatasetLink, session_brid
 # Application metadata
 APP_VERSION = "5.0.0"
 
-# --- DuckDB durable dataset layer (NEW) ---
-# Adds permanent dataset_id + Parquet persistence, plus /datasets/* endpoints
-try:
-    from app.routers.datasets import router as datasets_router
-    from app.routers.query import router as duckdb_query_router
-    from app.routers.stats import router as duckdb_stats_router
-    DUCKDB_LAYER_AVAILABLE = True
-except Exception as _e:
-    DUCKDB_LAYER_AVAILABLE = False
-    print(f"⚠️  Warning: DuckDB dataset layer not available: {_e}")
+
+print("=" * 60)
+print("AI Data Lab Backend v6.0 Starting...")
+print("=" * 60)
+
+# Import routers with error handling
+routers_to_mount = []
+
+def _try_load_router(name: str, import_path: str):
+    try:
+        module = __import__(import_path, fromlist=["router"])
+        routers_to_mount.append((name, module.router))
+        print(f"[ok] {name} router loaded")
+    except ImportError as e:
+        print(f"[warn] Could not load {name} router: {e}")
 
 
-# Transform engine imports
-try:
-    from transformers.registry import registry
-    from transformers.base import TransformError
-    TRANSFORMS_AVAILABLE = True
-except ImportError:
-    TRANSFORMS_AVAILABLE = False
-    print("⚠️  Warning: Transform engine not available. Install transformers package.")
+_try_load_router("datasets", "app.routers.datasets")
+_try_load_router("stats", "app.routers.stats")
+_try_load_router("quality", "app.routers.quality")
+_try_load_router("transforms", "app.routers.transforms")
+_try_load_router("agents", "app.routers.agents")
 
 # Transform service
 try:
@@ -67,25 +69,19 @@ except ImportError:
     TRANSFORM_SERVICE_AVAILABLE = False
     print("⚠️  Warning: Transform service not available.")
 
-# Type inference
-try:
-    from utils.type_inference import infer_column_role
-    TYPE_INFERENCE_AVAILABLE = True
-except ImportError:
-    TYPE_INFERENCE_AVAILABLE = False
+print("=" * 60)
 
-# ---------------------------------------------------
 # FastAPI App Setup
-# ---------------------------------------------------
 app = FastAPI(
     title="AI Data Lab - Complete Analytics Platform",
     version=APP_VERSION,
     description="Minitab-level Statistics + 60+ Data Transforms + Table Operations"
 )
 
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Configure appropriately for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -424,90 +420,10 @@ def _load_dataframe(file: UploadFile) -> pd.DataFrame:
     filename = file.filename.lower()
     
     try:
-        if filename.endswith(".csv"):
-            df = pd.read_csv(buffer)
-        elif filename.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(buffer)
-        else:
-            raise HTTPException(400, "Unsupported file type. Please upload CSV or Excel.")
+        app.include_router(router)
+        print(f"[ok] Mounted {name} router")
     except Exception as e:
-        raise HTTPException(400, f"Failed to parse file: {e}")
-    
-    if df.empty:
-        raise HTTPException(400, "File contained no rows.")
-    
-    return df
-
-
-# ---------------------------------------------------
-# Utility Functions - Profiling
-# ---------------------------------------------------
-def _build_profile(df: pd.DataFrame, session_id: str) -> ProfileResponse:
-    """Create profile summary for the UI"""
-    cols: List[ColumnInfo] = []
-    descriptives: List[DescriptiveStats] = []
-    
-    for col in df.columns:
-        s = df[col]
-        role = _infer_role(s)
-        missing_pct = float(s.isna().mean() * 100)
-        
-        cols.append(
-            ColumnInfo(
-                name=col,
-                dtype=str(s.dtype),
-                role=role,
-                missing_pct=round(missing_pct, 2),
-                unique_count=int(s.nunique()),
-                sample_values=s.dropna().head(3).tolist() if len(s.dropna()) > 0 else []
-            )
-        )
-        
-        if role == "numeric":
-            desc = s.describe(percentiles=[0.25, 0.5, 0.75])
-            descriptives.append(
-                DescriptiveStats(
-                    column=col,
-                    count=int(desc.get("count", 0)),
-                    mean=float(desc["mean"]) if not np.isnan(desc["mean"]) else None,
-                    std=float(desc["std"]) if not np.isnan(desc["std"]) else None,
-                    min=float(desc["min"]) if not np.isnan(desc["min"]) else None,
-                    q25=float(desc["25%"]) if not np.isnan(desc["25%"]) else None,
-                    median=float(desc["50%"]) if not np.isnan(desc["50%"]) else None,
-                    q75=float(desc["75%"]) if not np.isnan(desc["75%"]) else None,
-                    max=float(desc["max"]) if not np.isnan(desc["max"]) else None,
-                    skewness=float(s.skew()) if not np.isnan(s.skew()) else None,
-                    kurtosis=float(s.kurtosis()) if not np.isnan(s.kurtosis()) else None
-                )
-            )
-    
-    # Generate sample rows for frontend data preview
-    sample_rows = df.head(100).replace({np.nan: None, pd.NaT: None}).to_dict(orient='records')
-    
-    return ProfileResponse(
-        session_id=session_id,
-        n_rows=int(len(df)),
-        n_cols=int(df.shape[1]),
-        columns=cols,
-        schema=cols,
-        descriptives=descriptives,
-        sample_rows=sample_rows
-    )
-
-
-def _build_correlation(df: pd.DataFrame, method: str = "pearson") -> Optional[CorrelationResponse]:
-    """Build correlation matrix for numeric columns"""
-    numeric_df = df.select_dtypes(include=[np.number]).dropna()
-    if numeric_df.shape[1] < 2:
-        return None
-    
-    corr = numeric_df.corr(method=method)
-    corr_dict: Dict[str, Dict[str, float]] = {}
-    for col in corr.columns:
-        corr_dict[col] = {idx: float(val) for idx, val in corr[col].items()}
-    
-    return CorrelationResponse(matrix=corr_dict, method=method)
-
+        print(f"[error] Failed to mount {name} router: {e}")
 
 # ---------------------------------------------------
 # Utility Functions - JSON Safety
@@ -1077,28 +993,12 @@ def _set_session(session_id: str, df: pd.DataFrame, metadata: Optional[dict] = N
 def root():
     """Root endpoint with API information"""
     return {
-        "name": "AI Data Lab - Complete Analytics Platform",
-        "version": "5.0.0",
-        "description": "Minitab-level Statistics + 60+ Transforms + Table Operations",
-        "endpoints": {
-            "upload": "POST /upload - Upload CSV/Excel file",
-            "analysis": "GET /analysis/{session_id} - Full statistical analysis",
-            "query": "POST /query/{session_id} - Flexible data queries",
-            "transforms": "GET /transforms - List available transforms",
-            "control_chart": "POST /control-chart/{session_id} - Quality control charts",
-            "capability": "POST /process-capability/{session_id} - Process capability analysis",
-            "docs": "/docs - Interactive API documentation"
-        },
-        "capabilities": [
-            "Descriptive Statistics (mean, median, std, skewness, kurtosis)",
-            "Statistical Tests (t-test, ANOVA, Mann-Whitney, Kruskal-Wallis)",
-            "Regression Analysis (with diagnostics: VIF, Cook's D, Durbin-Watson)",
-            "Control Charts (X-bar, I-chart, P-chart)",
-            "Process Capability (Cp, Cpk, Six Sigma metrics)",
-            "60+ Data Transforms (datetime, numeric, text, categorical, ML)",
-            "Table Operations (group by, pivot, merge, filter)",
-            "Advanced Analytics (PCA, clustering, time series)"
-        ]
+        "name": "AI Data Lab API",
+        "version": "6.0.0",
+        "status": "running",
+        "docs": "/docs",
+        "routers_loaded": [name for name, _ in routers_to_mount],
+        "description": "Advanced data analysis with AI-powered insights",
     }
 
 
@@ -1600,556 +1500,12 @@ async def get_schema(session_id: str):
         })
     
     return {
-        "session_id": session_id,
-        "n_rows": len(df),
-        "n_cols": len(df.columns),
-        "schema": schema,
-        "missing_summary": missing_summary
+        "status": "ok",
+        "version": "6.0.0",
+        "routers": len(routers_to_mount),
     }
 
 
-@app.post("/query/{session_id}", response_model=QueryResponse)
-async def query_dataset(session_id: str, request: QueryRequest):
-    """
-    Execute aggregation/filter queries on the dataset.
-    CRITICAL for AI chat and chart generation in frontend.
-    
-    Supports:
-    - aggregate: Group by and aggregate with metrics
-    - filter: Filter rows based on conditions
-    - distinct: Get unique rows
-    - crosstab: Create pivot-style cross tabulation
-    - describe: Statistical summary
-    """
-    df = _get_session(session_id)
-    
-    try:
-        result_df = df.copy()
-        
-        # Apply filters first
-        if request.filters:
-            for f in request.filters:
-                col = f.get("column")
-                op = f.get("op") or f.get("operator", "==")
-                val = f.get("value")
-                
-                if col not in result_df.columns:
-                    continue
-                
-                if op == "==" or op == "eq":
-                    result_df = result_df[result_df[col] == val]
-                elif op == "!=" or op == "ne":
-                    result_df = result_df[result_df[col] != val]
-                elif op == ">" or op == "gt":
-                    result_df = result_df[result_df[col] > val]
-                elif op == "<" or op == "lt":
-                    result_df = result_df[result_df[col] < val]
-                elif op == ">=" or op == "gte":
-                    result_df = result_df[result_df[col] >= val]
-                elif op == "<=" or op == "lte":
-                    result_df = result_df[result_df[col] <= val]
-                elif op == "in":
-                    result_df = result_df[result_df[col].isin(val if isinstance(val, list) else [val])]
-                elif op == "not_in":
-                    result_df = result_df[~result_df[col].isin(val if isinstance(val, list) else [val])]
-                elif op == "contains":
-                    result_df = result_df[result_df[col].astype(str).str.contains(str(val), case=False, na=False)]
-                elif op == "starts_with":
-                    result_df = result_df[result_df[col].astype(str).str.startswith(str(val), na=False)]
-        
-        # Handle different operations
-        if request.operation == "aggregate":
-            if request.group_by:
-                # Handle aggregations - support both formats
-                agg_dict = {}
-                
-                # Format 1: metrics list [{"column": "x", "agg": "mean"}]
-                if request.metrics:
-                    for m in request.metrics:
-                        col = m.get("column")
-                        agg = m.get("agg", "count")
-                        
-                        if col == "*" or agg == "count":
-                            agg_dict["count"] = (result_df.columns[0], "size")
-                        elif col in result_df.columns:
-                            agg_dict[f"{col}_{agg}"] = (col, agg)
-                
-                # Format 2: aggregations dict {"total_sales": "sales:sum"}
-                if request.aggregations:
-                    for alias, spec in request.aggregations.items():
-                        if ":" in spec:
-                            col, agg = spec.split(":", 1)
-                            if col == "*" or agg == "count":
-                                agg_dict[alias] = (result_df.columns[0], "size")
-                            elif col in result_df.columns:
-                                agg_dict[alias] = (col, agg)
-                
-                # If no aggregations specified, default to count
-                if not agg_dict:
-                    agg_dict["count"] = (result_df.columns[0], "size")
-                
-                # Perform groupby
-                result_df = result_df.groupby(request.group_by, as_index=False).agg(**agg_dict)
-            else:
-                # Aggregate without grouping (overall stats)
-                agg_result = {}
-                if request.metrics:
-                    for m in request.metrics:
-                        col = m.get("column")
-                        agg = m.get("agg", "count")
-                        if col in result_df.columns:
-                            if agg == "mean":
-                                agg_result[f"{col}_mean"] = float(result_df[col].mean())
-                            elif agg == "sum":
-                                agg_result[f"{col}_sum"] = float(result_df[col].sum())
-                            elif agg == "count":
-                                agg_result[f"{col}_count"] = int(result_df[col].count())
-                            elif agg == "min":
-                                agg_result[f"{col}_min"] = float(result_df[col].min())
-                            elif agg == "max":
-                                agg_result[f"{col}_max"] = float(result_df[col].max())
-                            elif agg == "std":
-                                agg_result[f"{col}_std"] = float(result_df[col].std())
-                
-                return QueryResponse(
-                    success=True,
-                    result={
-                        "data": [agg_result],
-                        "columns": list(agg_result.keys()),
-                        "row_count": 1
-                    }
-                )
-        
-        elif request.operation == "distinct":
-            if request.group_by:
-                result_df = result_df[request.group_by].drop_duplicates()
-            else:
-                result_df = result_df.drop_duplicates()
-        
-        elif request.operation == "describe":
-            desc = result_df.describe(include='all').to_dict()
-            return QueryResponse(
-                success=True,
-                result={
-                    "data": desc,
-                    "columns": list(desc.keys()),
-                    "row_count": len(desc)
-                }
-            )
-        
-        elif request.operation == "crosstab":
-            if request.group_by and len(request.group_by) >= 2:
-                # Create crosstab
-                index_col = request.group_by[0]
-                column_col = request.group_by[1]
-                
-                # Get value column from metrics or use count
-                value_col = None
-                agg_func = "count"
-                if request.metrics and len(request.metrics) > 0:
-                    value_col = request.metrics[0].get("column")
-                    agg_func = request.metrics[0].get("agg", "count")
-                
-                if value_col and value_col in result_df.columns:
-                    crosstab = pd.crosstab(
-                        result_df[index_col],
-                        result_df[column_col],
-                        values=result_df[value_col],
-                        aggfunc=agg_func
-                    )
-                else:
-                    crosstab = pd.crosstab(result_df[index_col], result_df[column_col])
-                
-                # Convert to records format
-                crosstab_reset = crosstab.reset_index()
-                result_df = crosstab_reset
-        
-        # Apply limit
-        if request.limit and request.limit > 0:
-            result_df = result_df.head(request.limit)
-        
-        # Convert to JSON-safe format
-        result_df = result_df.replace({np.nan: None, pd.NaT: None, np.inf: None, -np.inf: None})
-        
-        # Convert result to records
-        result_data = result_df.to_dict(orient="records")
-        
-        return QueryResponse(
-            success=True,
-            result={
-                "data": result_data,
-                "columns": list(result_df.columns),
-                "row_count": len(result_data)
-            }
-        )
-    
-    except Exception as e:
-        return QueryResponse(success=False, error=str(e))
-
-
-# ===================================================
-# API ENDPOINTS - Transform Engine v2 (New Enhanced)
-# ===================================================
-if TRANSFORM_SERVICE_AVAILABLE:
-    
-    @app.get("/transforms", response_model=TransformDiscoveryResponse)
-    def get_all_transforms():
-        """Get complete catalog of available transforms"""
-        all_transforms = transform_service.get_all_transforms()
-        
-        transforms_dict = {}
-        for name, info in all_transforms.items():
-            transforms_dict[name] = TransformDefinition(
-                input_types=info.get("input_types", []),
-                output_type=info.get("output_type", "unknown"),
-                params=info.get("params", {}),
-                description=info.get("description", ""),
-                examples=info.get("examples", [])
-            )
-        
-        return TransformDiscoveryResponse(transforms=transforms_dict)
-    
-    
-    @app.get("/transforms/for/{column_type}")
-    def get_transforms_for_type(column_type: str):
-        """Get available transforms for a specific column type"""
-        transforms = transform_service.get_available_transforms(column_type)
-        return {"column_type": column_type, "transforms": transforms}
-    
-    
-    @app.post("/session/{session_id}/suggest/{column}", response_model=SuggestTransformsResponse)
-    def suggest_transforms_v2(session_id: str, column: str, limit: int = 5):
-        """Get AI-powered transform suggestions for a column"""
-        df = _get_session(session_id)
-        
-        try:
-            suggestions = transform_service.suggest_transforms(df, column, limit)
-            return suggestions
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/transform/preview")
-    def preview_transform(
-        session_id: str,
-        column: str,
-        transform_type: str,
-        params: Optional[Dict[str, Any]] = None,
-        n_rows: int = 100
-    ):
-        """Preview transform without applying it"""
-        df = _get_session(session_id)
-        
-        try:
-            preview = transform_service.preview_transform(df, column, transform_type, params, n_rows)
-            return preview
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/transform/apply")
-    def apply_transform_v2(
-        session_id: str,
-        request: TransformRequestV2,
-        new_column_name: Optional[str] = None,
-        replace_original: bool = False
-    ):
-        """Apply transform(s) to create a new column or replace existing"""
-        df = _get_session(session_id)
-        
-        try:
-            # Apply transform chain
-            result_series, metadata_list = transform_service.apply_transform_chain(df, request)
-            
-            # Determine column name
-            if replace_original:
-                col_name = request.column
-            elif new_column_name:
-                col_name = new_column_name
-            else:
-                # Auto-generate name
-                transform_names = "_".join([spec.type for spec in request.transforms])
-                col_name = f"{request.column}_{transform_names}"
-            
-            # Add to dataframe
-            df[col_name] = result_series
-            _set_session(session_id, df)
-            
-            return {
-                "success": True,
-                "column_created": col_name,
-                "metadata": metadata_list,
-                "n_rows": len(df)
-            }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/transform/batch")
-    def apply_batch_transforms(
-        session_id: str,
-        transforms: Dict[str, TransformRequestV2]
-    ):
-        """Apply multiple transforms at once"""
-        df = _get_session(session_id)
-        
-        results = {}
-        errors = {}
-        
-        for new_col_name, request in transforms.items():
-            try:
-                result_series, metadata_list = transform_service.apply_transform_chain(df, request)
-                df[new_col_name] = result_series
-                results[new_col_name] = {"success": True, "metadata": metadata_list}
-            except Exception as e:
-                errors[new_col_name] = str(e)
-        
-        if results:
-            _set_session(session_id, df)
-        
-        return {
-            "success": len(errors) == 0,
-            "results": results,
-            "errors": errors if errors else None
-        }
-    
-    
-    # Table Operations
-    @app.post("/session/{session_id}/group_by")
-    def group_by_aggregate(
-        session_id: str,
-        group_by: List[str],
-        aggregations: Dict[str, str],
-        create_new_session: bool = True
-    ):
-        """Group by and aggregate"""
-        df = _get_session(session_id)
-        
-        try:
-            result = transform_service.group_by(df, group_by, aggregations)
-            
-            if create_new_session:
-                new_session_id = str(uuid4())
-                _set_session(new_session_id, result, metadata={"parent_session": session_id})
-                return {
-                    "success": True,
-                    "session_id": new_session_id,
-                    "n_rows": len(result),
-                    "n_cols": len(result.columns)
-                }
-            else:
-                _set_session(session_id, result)
-                return {
-                    "success": True,
-                    "session_id": session_id,
-                    "n_rows": len(result),
-                    "n_cols": len(result.columns)
-                }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/pivot")
-    def create_pivot_table(
-        session_id: str,
-        index: List[str],
-        columns: str,
-        values: str,
-        aggfunc: str = "sum"
-    ):
-        """Create pivot table"""
-        df = _get_session(session_id)
-        
-        try:
-            result = transform_service.pivot_table(df, index, columns, values, aggfunc)
-            
-            new_session_id = str(uuid4())
-            _set_session(new_session_id, result, metadata={"parent_session": session_id})
-            
-            return {
-                "success": True,
-                "session_id": new_session_id,
-                "n_rows": len(result),
-                "n_cols": len(result.columns)
-            }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/unpivot")
-    def unpivot_table(
-        session_id: str,
-        id_vars: List[str],
-        value_vars: Optional[List[str]] = None,
-        var_name: str = "variable",
-        value_name: str = "value"
-    ):
-        """Unpivot/melt table"""
-        df = _get_session(session_id)
-        
-        try:
-            result = transform_service.unpivot(df, id_vars, value_vars, var_name, value_name)
-            
-            new_session_id = str(uuid4())
-            _set_session(new_session_id, result, metadata={"parent_session": session_id})
-            
-            return {
-                "success": True,
-                "session_id": new_session_id,
-                "n_rows": len(result),
-                "n_cols": len(result.columns)
-            }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/merge/{other_session_id}")
-    def merge_sessions(
-        session_id: str,
-        other_session_id: str,
-        on: Optional[List[str]] = None,
-        left_on: Optional[List[str]] = None,
-        right_on: Optional[List[str]] = None,
-        how: str = "inner"
-    ):
-        """Merge two datasets (like SQL JOIN)"""
-        left_df = _get_session(session_id)
-        right_df = _get_session(other_session_id)
-        
-        try:
-            result = transform_service.merge_tables(left_df, right_df, on, left_on, right_on, how)
-            
-            new_session_id = str(uuid4())
-            _set_session(new_session_id, result, metadata={
-                "left_session": session_id,
-                "right_session": other_session_id,
-                "join_type": how
-            })
-            
-            return {
-                "success": True,
-                "session_id": new_session_id,
-                "n_rows": len(result),
-                "n_cols": len(result.columns)
-            }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/remove_duplicates")
-    def remove_duplicates(
-        session_id: str,
-        subset: Optional[List[str]] = None,
-        keep: str = "first"
-    ):
-        """Remove duplicate rows"""
-        df = _get_session(session_id)
-        
-        original_count = len(df)
-        result = transform_service.remove_duplicates(df, subset, keep)
-        _set_session(session_id, result)
-        
-        return {
-            "success": True,
-            "rows_removed": original_count - len(result),
-            "n_rows": len(result)
-        }
-    
-    
-    @app.post("/session/{session_id}/fill_missing")
-    def fill_missing_values(
-        session_id: str,
-        column: str,
-        method: str = "ffill",
-        value: Optional[Any] = None
-    ):
-        """Fill missing values in a column"""
-        df = _get_session(session_id)
-        
-        try:
-            result_series = transform_service.fill_missing(df, column, method, value)
-            df[column] = result_series
-            _set_session(session_id, df)
-            
-            return {
-                "success": True,
-                "null_count": int(result_series.isna().sum())
-            }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-    
-    
-    @app.post("/session/{session_id}/filter")
-    def filter_rows(
-        session_id: str,
-        filters: List[FilterSpec],
-        create_new_session: bool = False
-    ):
-        """Filter rows based on conditions"""
-        df = _get_session(session_id)
-        
-        try:
-            result = df
-            for filter_spec in filters:
-                result = transform_service.filter_rows(
-                    result,
-                    filter_spec.column,
-                    filter_spec.operator,
-                    filter_spec.value
-                )
-            
-            if create_new_session:
-                new_session_id = str(uuid4())
-                _set_session(new_session_id, result, metadata={"parent_session": session_id})
-                return {
-                    "success": True,
-                    "session_id": new_session_id,
-                    "n_rows": len(result)
-                }
-            else:
-                _set_session(session_id, result)
-                return {
-                    "success": True,
-                    "session_id": session_id,
-                    "n_rows": len(result)
-                }
-        except Exception as e:
-            raise HTTPException(400, str(e))
-
-
-# ===================================================
-# API ENDPOINTS - Data Export
-# ===================================================
-@app.get("/session/{session_id}/export")
-def export_data(session_id: str, format: str = "csv"):
-    """Export current session data"""
-    df = _get_session(session_id)
-    
-    if format == "csv":
-        stream = StringIO()
-        df.to_csv(stream, index=False)
-        stream.seek(0)
-        return StreamingResponse(
-            iter([stream.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=export_{session_id}.csv"}
-        )
-    elif format == "json":
-        stream = StringIO()
-        df.to_json(stream, orient="records", indent=2)
-        stream.seek(0)
-        return StreamingResponse(
-            iter([stream.getvalue()]),
-            media_type="application/json",
-            headers={"Content-Disposition": f"attachment; filename=export_{session_id}.json"}
-        )
-    else:
-        raise HTTPException(400, "Unsupported format. Use 'csv' or 'json'")
-
-
-# ===================================================
-# Startup Message
-# ===================================================
 @app.on_event("startup")
 async def startup_event():
     missing_env = require_env_vars()
@@ -2166,6 +1522,6 @@ async def startup_event():
 
 
 if __name__ == "__main__":
-    import os, uvicorn
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
