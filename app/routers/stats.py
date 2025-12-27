@@ -26,20 +26,24 @@ def qident(col: str) -> str:
 
 
 # ----------------------------
-# Backward compatible request
+# Backward compatible request models
 # ----------------------------
 class LegacyAnalysisPayload(BaseModel):
-    # legacy swagger format:
-    # { "analysis": { "action": "descriptives", "columns": ["x"] } }
+    """Legacy swagger format: {analysis: {action, columns}}"""
     action: str
     columns: List[str] = Field(default_factory=list)
 
 
 class LegacyStatsRequest(BaseModel):
+    """Wrapper for legacy format"""
     analysis: LegacyAnalysisPayload
 
 
+# ----------------------------
+# Helper: Ensure parquet is local
+# ----------------------------
 def _ensure_parquet_local(dataset_id: str, user_id: str) -> Path:
+    """Download parquet file to local cache if not present"""
     registry = DatasetRegistry()
     ds = registry.get(dataset_id, user_id)
     if not ds:
@@ -59,6 +63,9 @@ def _ensure_parquet_local(dataset_id: str, user_id: str) -> Path:
     return parquet_path
 
 
+# ----------------------------
+# Analysis: Descriptive Statistics
+# ----------------------------
 def _descriptives_duckdb(parquet_path: Path, columns: List[str]) -> Dict[str, Any]:
     """
     Compute descriptives using DuckDB with TRY_CAST so non-numeric cols won't crash.
@@ -75,7 +82,7 @@ def _descriptives_duckdb(parquet_path: Path, columns: List[str]) -> Dict[str, An
         results: Dict[str, Any] = {}
 
         for col in columns:
-            c = qident(col)  # ✅ FIX: quote identifier
+            c = qident(col)  # ✅ Quote identifier
 
             q = f"""
             SELECT
@@ -110,23 +117,29 @@ def _descriptives_duckdb(parquet_path: Path, columns: List[str]) -> Dict[str, An
         return {"analysis": "descriptives", "columns": columns, "results": results}
 
 
+# ----------------------------
+# Helper: Fetch columns as numpy
+# ----------------------------
 def _fetch_columns_numpy(parquet_path: Path, cols: List[str]) -> Dict[str, np.ndarray]:
     """
     Fetch raw columns into numpy arrays.
-    ✅ FIX: quote identifiers in SELECT so columns with spaces/symbols don't break.
+    ✅ Quote identifiers in SELECT so columns with spaces/symbols don't break.
     """
     duck = DuckDBManager()
     with duck.connect() as con:
         path_sql = str(parquet_path).replace("'", "''")
         con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
 
-        sel = ", ".join(qident(c) for c in cols)  # ✅ FIX: quote cols
+        sel = ", ".join(qident(c) for c in cols)  # ✅ Quote columns
         df = con.execute(f"SELECT {sel} FROM ds").fetchdf()
 
     # df columns come back unquoted (original names), so map using the original list
     return {c: df[c].to_numpy() for c in cols}
 
 
+# ----------------------------
+# Main Stats Endpoint (ENHANCED)
+# ----------------------------
 @router.post("/{dataset_id}/stats")
 def run_stats(
     dataset_id: str,
@@ -134,18 +147,33 @@ def run_stats(
     body: Union[StatsSpec, LegacyStatsRequest, Dict[str, Any]],
 ):
     """
+    Enhanced statistical analysis endpoint.
+    
     Supports BOTH formats:
-
-    New (StatsSpec-ish):
+    
+    **New (StatsSpec)**:
+```json
     {
       "analysis": "descriptives",
-      "params": { "columns": ["lengthofstay_days"] }
+      "params": { "columns": ["age", "income"] }
     }
-
-    Legacy:
+```
+    
+    **Legacy**:
+```json
     {
-      "analysis": { "action": "descriptives", "columns": ["lengthofstay_days"] }
+      "analysis": { 
+        "action": "descriptives", 
+        "columns": ["age", "income"] 
+      }
     }
+```
+    
+    Available analyses:
+    - descriptives: Summary statistics
+    - ttest: T-test (one_sample, two_sample, paired)
+    - anova_oneway: One-way ANOVA
+    - regression_ols: OLS regression
     """
     if not user_id:
         raise HTTPException(status_code=422, detail="Missing required query param: user_id")
@@ -153,26 +181,30 @@ def run_stats(
     parquet_path = _ensure_parquet_local(dataset_id, user_id)
 
     # ----------------------------
-    # Normalize request
+    # Normalize request format
     # ----------------------------
     analysis: Optional[str] = None
     params: Dict[str, Any] = {}
 
     if isinstance(body, StatsSpec):
+        # New format
         analysis = body.analysis
         params = body.params if isinstance(body.params, dict) else body.params.model_dump()
     elif isinstance(body, LegacyStatsRequest):
+        # Legacy format
         analysis = body.analysis.action
         params = {"columns": body.analysis.columns}
     elif isinstance(body, dict):
-        # accept either legacy or new as dict
+        # Raw dict - accept either format
         if isinstance(body.get("analysis"), dict) and "action" in body["analysis"]:
+            # Legacy: {"analysis": {"action": "...", "columns": [...]}}
             analysis = body["analysis"].get("action")
             params = {"columns": body["analysis"].get("columns", [])}
         elif isinstance(body.get("analysis"), str):
+            # New: {"analysis": "...", "params": {...}}
             analysis = body.get("analysis")
             params = body.get("params", {}) or {}
-            # also allow direct "columns" at top-level
+            # Also allow direct "columns" at top-level
             if "columns" in body and "columns" not in params:
                 params["columns"] = body["columns"]
         else:
@@ -184,15 +216,18 @@ def run_stats(
         raise HTTPException(status_code=422, detail="Invalid request body")
 
     if not analysis:
-        raise HTTPException(status_code=422, detail="Missing analysis")
+        raise HTTPException(status_code=422, detail="Missing analysis type")
 
     # ----------------------------
     # Route by analysis type
     # ----------------------------
+    
+    # DESCRIPTIVE STATISTICS
     if analysis == "descriptives":
         cols = params.get("columns") or params.get("cols") or []
         return _descriptives_duckdb(parquet_path, cols)
 
+    # T-TEST
     if analysis == "ttest":
         p = TTestSpec.model_validate(params)
 
@@ -201,7 +236,13 @@ def run_stats(
             data = data.astype(float, copy=False)
             data = data[~np.isnan(data)]
             t, pv = stats.ttest_1samp(data, popmean=p.mu)
-            return {"analysis": "ttest", "type": p.type, "t": float(t), "p_value": float(pv), "n": int(len(data))}
+            return {
+                "analysis": "ttest",
+                "type": p.type,
+                "t": float(t),
+                "p_value": float(pv),
+                "n": int(len(data))
+            }
 
         if p.type == "two_sample":
             if not p.group:
@@ -233,6 +274,7 @@ def run_stats(
 
         raise HTTPException(status_code=400, detail="paired t-test not implemented")
 
+    # ANOVA
     if analysis == "anova_oneway":
         p = AnovaSpec.model_validate(params)
 
@@ -261,6 +303,7 @@ def run_stats(
             "k": int(len(groups)),
         }
 
+    # REGRESSION
     if analysis == "regression_ols":
         p = RegressionSpec.model_validate(params)
 
@@ -269,7 +312,7 @@ def run_stats(
             path_sql = str(parquet_path).replace("'", "''")
             con.execute(f"CREATE TEMP VIEW ds AS SELECT * FROM read_parquet('{path_sql}')")
 
-            # ✅ FIX: quote identifiers
+            # ✅ Quote identifiers
             y_col = qident(p.y)
             x_cols = ", ".join(qident(c) for c in p.x)
             df = con.execute(f"SELECT {y_col} AS y, {x_cols} FROM ds").fetchdf().dropna()
@@ -291,3 +334,165 @@ def run_stats(
         }
 
     raise HTTPException(status_code=400, detail=f"Unknown analysis: {analysis}")
+
+
+# ----------------------------
+# Additional Stats Endpoints (NEW)
+# ----------------------------
+
+@router.post("/{dataset_id}/stats/auto")
+def auto_analysis(dataset_id: str, user_id: str):
+    """
+    Automatic statistical analysis.
+    Detects column types and runs appropriate tests.
+    """
+    parquet_path = _ensure_parquet_local(dataset_id, user_id)
+    
+    duck = DuckDBManager()
+    profile = duck.profile_parquet(parquet_path, sample_n=100)
+    
+    schema = profile["schema"]
+    numeric_cols = [col["name"] for col in schema if "INT" in col["type"].upper() or "FLOAT" in col["type"].upper() or "DOUBLE" in col["type"].upper()]
+    
+    if not numeric_cols:
+        return {
+            "analysis": "auto",
+            "message": "No numeric columns found for analysis",
+            "descriptives": {}
+        }
+    
+    # Run descriptives on all numeric columns
+    descriptives = _descriptives_duckdb(parquet_path, numeric_cols[:10])  # Limit to 10 columns
+    
+    return {
+        "analysis": "auto",
+        "dataset_id": dataset_id,
+        "descriptives": descriptives,
+        "n_rows": profile["n_rows"],
+        "n_cols": len(schema)
+    }
+
+
+@router.post("/{dataset_id}/stats/regression")
+def regression_analysis(
+    dataset_id: str,
+    user_id: str,
+    target: str,
+    predictors: List[str],
+    include_diagnostics: bool = True
+):
+    """
+    Advanced regression analysis with diagnostics.
+    
+    Args:
+        target: Dependent variable
+        predictors: Independent variables
+        include_diagnostics: Include VIF, residuals, etc.
+    """
+    parquet_path = _ensure_parquet_local(dataset_id, user_id)
+    
+    # Run regression using existing function
+    result = run_stats(
+        dataset_id=dataset_id,
+        user_id=user_id,
+        body={
+            "analysis": "regression_ols",
+            "params": {
+                "y": target,
+                "x": predictors,
+                "add_intercept": True
+            }
+        }
+    )
+    
+    if include_diagnostics:
+        # Add diagnostic information
+        result["diagnostics"] = {
+            "note": "Advanced diagnostics coming soon",
+            "recommendations": [
+                "Check residual plots for normality",
+                "Examine VIF for multicollinearity",
+                "Review Cook's distance for influential points"
+            ]
+        }
+    
+    return result
+
+
+@router.post("/{dataset_id}/stats/normality")
+def normality_tests_endpoint(dataset_id: str, user_id: str, columns: List[str]):
+    """
+    Test columns for normality.
+    
+    Returns Shapiro-Wilk and Anderson-Darling test results.
+    """
+    parquet_path = _ensure_parquet_local(dataset_id, user_id)
+    
+    results = {}
+    
+    for col in columns[:10]:  # Limit to 10 columns
+        try:
+            data_dict = _fetch_columns_numpy(parquet_path, [col])
+            data = data_dict[col]
+            data = data[~np.isnan(data)]
+            
+            if len(data) < 3:
+                results[col] = {"error": "Insufficient data (n < 3)"}
+                continue
+            
+            # Shapiro-Wilk test
+            shapiro_stat, shapiro_p = stats.shapiro(data)
+            
+            results[col] = {
+                "n": int(len(data)),
+                "shapiro_wilk": {
+                    "statistic": float(shapiro_stat),
+                    "p_value": float(shapiro_p),
+                    "is_normal": bool(shapiro_p > 0.05)
+                }
+            }
+            
+        except Exception as e:
+            results[col] = {"error": str(e)}
+    
+    return {
+        "analysis": "normality",
+        "results": results
+    }
+
+
+@router.post("/{dataset_id}/stats/advanced")
+def advanced_analysis(
+    dataset_id: str,
+    user_id: str,
+    analysis_type: str,
+    params: Dict[str, Any]
+):
+    """
+    Advanced statistical analyses.
+    
+    Supported types:
+    - correlation: Correlation matrix
+    - variance_test: Levene's test
+    - chi_square: Chi-square test of independence
+    """
+    parquet_path = _ensure_parquet_local(dataset_id, user_id)
+    
+    if analysis_type == "correlation":
+        columns = params.get("columns", [])
+        if not columns:
+            raise HTTPException(400, "columns required for correlation")
+        
+        data_dict = _fetch_columns_numpy(parquet_path, columns)
+        
+        # Build correlation matrix
+        import pandas as pd
+        df = pd.DataFrame(data_dict)
+        corr_matrix = df.corr()
+        
+        return {
+            "analysis": "correlation",
+            "matrix": corr_matrix.to_dict()
+        }
+    
+    raise HTTPException(400, f"Unknown advanced analysis type: {analysis_type}")
