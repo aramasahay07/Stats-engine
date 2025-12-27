@@ -34,26 +34,3 @@ class DatasetRegistry:
 
     def patch(self, dataset_id: str, user_id: str, patch: Dict[str, Any]) -> None:
         self.client.table(self.table).update(patch).eq("dataset_id", dataset_id).eq("user_id", user_id).execute()
-
-    def list_by_user(self, user_id: str, limit: int = 50):
-        """List recent datasets for a user."""
-        res = (
-            self.client.table(self.table)
-            .select("*")
-            .eq("user_id", user_id)
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return res.data or []
-
-    def delete(self, dataset_id: str, user_id: str) -> bool:
-        """Delete a dataset row; return True if a row was removed."""
-        res = (
-            self.client.table(self.table)
-            .delete()
-            .eq("dataset_id", dataset_id)
-            .eq("user_id", user_id)
-            .execute()
-        )
-        return bool(res.data)
