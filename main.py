@@ -4,7 +4,7 @@ Complete Statistical Engine + Transform Engine
 Combines v4.0 Minitab-level stats with v2.0 Transform capabilities
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from knowledge.routers.kb import router as kb_router
 from fastapi.responses import StreamingResponse
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Literal
 from uuid import uuid4
 from io import BytesIO, StringIO
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -25,6 +26,17 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from ai_agent.router import create_agent_router
+from app.config import load_settings, print_startup_banner
+from app.services.parquet_loader import ensure_parquet_local
+from app.services.preflight import build_health_status, require_env_vars
+from app.services.dataset_creator import create_dataset_from_upload, persist_dataframe
+from app.services.dataset_registry import DatasetRegistry
+from app.services.storage_client import SupabaseStorageClient
+from app.services.cache_paths import CachePaths
+from app.services.session_dataset_bridge import SessionDatasetLink, session_bridge
+
+# Application metadata
+APP_VERSION = "5.0.0"
 
 # --- DuckDB durable dataset layer (NEW) ---
 # Adds permanent dataset_id + Parquet persistence, plus /datasets/* endpoints
@@ -50,7 +62,6 @@ except ImportError:
 # Transform service
 try:
     from transform_service import TransformService
-    from session_store import SessionStore
     TRANSFORM_SERVICE_AVAILABLE = True
 except ImportError:
     TRANSFORM_SERVICE_AVAILABLE = False
@@ -68,7 +79,7 @@ except ImportError:
 # ---------------------------------------------------
 app = FastAPI(
     title="AI Data Lab - Complete Analytics Platform",
-    version="5.0.0",
+    version=APP_VERSION,
     description="Minitab-level Statistics + 60+ Data Transforms + Table Operations"
 )
 
@@ -87,7 +98,16 @@ app.include_router(
 )
 
 
+@app.get("/health")
+def health():
+    """Authoritative health endpoint with dependency checks."""
+    return build_health_status(app_version=APP_VERSION)
 
+
+@app.get("/healthz")
+def healthz():
+    """Alias for platform probes."""
+    return health()
 
 # --- DuckDB durable dataset layer (NEW) ---
 if DUCKDB_LAYER_AVAILABLE:
@@ -98,17 +118,35 @@ if DUCKDB_LAYER_AVAILABLE:
 # ---------------------------------------------------
 # Data Storage
 # ---------------------------------------------------
-# Use SessionStore if available, otherwise fallback to dict
 if TRANSFORM_SERVICE_AVAILABLE:
-    session_store = SessionStore()
     transform_service = TransformService()
 else:
-    SESSIONS: Dict[str, pd.DataFrame] = {}
+    transform_service = None
 
-def _get_df(session_id: str):
-    if TRANSFORM_SERVICE_AVAILABLE:
-        return session_store.get(session_id)
-    return SESSIONS.get(session_id)
+CACHE_PATHS = CachePaths(base_dir=Path("./cache"))
+
+
+def _ensure_parquet_for_session(session_id: str) -> tuple[Path, SessionDatasetLink, dict | None]:
+    """Resolve a legacy session_id to its dataset parquet and metadata."""
+    link = session_bridge.require(session_id)
+    parquet_path, ds = ensure_parquet_local(
+        dataset_id=link.dataset_id,
+        user_id=link.user_id,
+        cache=CACHE_PATHS,
+        storage_client=SupabaseStorageClient(),
+        registry=DatasetRegistry(),
+    )
+    return parquet_path, link, ds
+
+
+def _get_df(session_id: str) -> pd.DataFrame:
+    parquet_path, _link, _ds = _ensure_parquet_for_session(session_id)
+    if not parquet_path.exists():
+        raise HTTPException(status_code=404, detail="Dataset parquet missing for session")
+    df = pd.read_parquet(parquet_path)
+    if df is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return df
 
 # ---------------------------------------------------
 # Agent Routes (NEW)
@@ -995,47 +1033,45 @@ def _calculate_process_capability(
 # Helper Functions - Session Management
 # ---------------------------------------------------
 def _get_session(session_id: str) -> pd.DataFrame:
-    """Get dataframe from session store"""
-    if TRANSFORM_SERVICE_AVAILABLE:
-        df = session_store.get(session_id)
-    else:
-        df = SESSIONS.get(session_id)
-    
-    if df is None:
-        raise HTTPException(404, "Session not found")
-    
-    return df
+    """Load dataframe for a legacy session via dataset-backed parquet."""
+    return _get_df(session_id)
 
 
 def _set_session(session_id: str, df: pd.DataFrame, metadata: Optional[dict] = None):
-    """Store dataframe in session"""
-    if TRANSFORM_SERVICE_AVAILABLE:
-        session_store.set(session_id, df, metadata)
-    else:
-        SESSIONS[session_id] = df
+    """Persist dataframe updates back to the dataset backing this session."""
 
+    link = session_bridge.get(session_id)
+    if not link:
+        parent_session = metadata.get("parent_session") if metadata else None
+        if parent_session:
+            parent_link = session_bridge.require(parent_session)
+            dataset_id = metadata.get("dataset_id") if metadata else None
+            dataset_id = dataset_id or session_id
+            link = session_bridge.ensure(
+                session_id=session_id,
+                dataset_id=dataset_id,
+                user_id=parent_link.user_id,
+                project_id=parent_link.project_id,
+                metadata=metadata,
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Unknown session_id; upload data first")
 
-# ===================================================
-# API ENDPOINTS - Core
-# ===================================================
-@app.get("/health")
-def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "ok",
-        "version": "5.0.0",
-        "features": {
-            "statistics": True,
-            "transforms": TRANSFORMS_AVAILABLE,
-            "transform_service": TRANSFORM_SERVICE_AVAILABLE,
-            "quality_control": True,
-            "advanced_analytics": True
-        }
-    }
+    file_name = None
+    if metadata:
+        file_name = metadata.get("filename") or metadata.get("file_name")
 
-@app.get("/healthz")
-def healthz():
-    return health_check()
+    persist_dataframe(
+        df,
+        user_id=link.user_id,
+        dataset_id=link.dataset_id,
+        project_id=link.project_id,
+        file_name=file_name or f"session_{session_id}.parquet",
+        base_dir=CACHE_PATHS.base_dir,
+    )
+
+    session_bridge.ensure(session_id, link.dataset_id, link.user_id, project_id=link.project_id, metadata=metadata or link.metadata)
+
 
 @app.get("/")
 def root():
@@ -1067,20 +1103,32 @@ def root():
 
 
 @app.post("/upload", response_model=ProfileResponse)
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    user_id: str = Form("anonymous"),
+    project_id: Optional[str] = Form(None),
+):
     """
-    Upload a CSV/Excel file, store as STAGING data,
-    and return a profile summary + session_id
+    Upload a CSV/Excel file, persist as a dataset, and expose a legacy session_id alias.
     """
-    df = _load_dataframe(file)
-    
-    # Basic cleaning: drop columns that are all missing
+    dataset_id, parquet_path, _resp = create_dataset_from_upload(
+        file, user_id=user_id, project_id=project_id, base_dir=CACHE_PATHS.base_dir
+    )
+
+    session_bridge.ensure(
+        session_id=dataset_id,
+        dataset_id=dataset_id,
+        user_id=user_id,
+        project_id=project_id,
+        metadata={"filename": file.filename},
+    )
+
+    df = pd.read_parquet(parquet_path)
     df = df.dropna(axis=1, how="all")
-    
-    session_id = str(uuid4())
-    _set_session(session_id, df, metadata={"filename": file.filename})
-    
-    profile = _build_profile(df, session_id)
+
+    _set_session(dataset_id, df, metadata={"filename": file.filename, "dataset_id": dataset_id})
+
+    profile = _build_profile(df, dataset_id)
     return profile
 
 
@@ -1112,8 +1160,7 @@ if DUCKDB_LAYER_AVAILABLE:
         if not parquet_ref:
             raise HTTPException(400, "Dataset missing parquet_ref")
 
-        cache = CachePaths(base_dir=Path("./cache"))
-        parquet_path = cache.parquet_path(user_id, dataset_id)
+        parquet_path = CACHE_PATHS.parquet_path(user_id, dataset_id)
         if not parquet_path.exists():
             storage = SupabaseStorageClient()
             storage.download_file(parquet_ref, parquet_path)
@@ -1122,7 +1169,13 @@ if DUCKDB_LAYER_AVAILABLE:
         df = df.dropna(axis=1, how="all")
 
         session_id = str(uuid4())
-        _set_session(session_id, df, metadata={"dataset_id": dataset_id, "source": "duckdb_parquet"})
+        session_bridge.ensure(
+            session_id=session_id,
+            dataset_id=dataset_id,
+            user_id=user_id,
+            project_id=ds.get("project_id"),
+            metadata={"dataset_id": dataset_id, "source": "duckdb_parquet"},
+        )
         return _build_profile(df, session_id)
 
 
@@ -1469,18 +1522,17 @@ async def suggest_transforms_v1(session_id: str, column: Optional[str] = None):
 async def get_session_info(session_id: str):
     """Get session metadata"""
     df = _get_session(session_id)
-    
-    if TRANSFORM_SERVICE_AVAILABLE:
-        metadata = session_store.get_metadata(session_id) or {}
-    else:
-        metadata = {}
-    
+
+    link = session_bridge.require(session_id)
+    metadata = link.metadata or {}
+
     return {
         "session_id": session_id,
         "n_rows": len(df),
         "n_cols": len(df.columns),
         "columns": list(df.columns),
         "memory_usage_mb": df.memory_usage(deep=True).sum() / (1024 * 1024),
+        "dataset_id": link.dataset_id,
         **metadata
     }
 
@@ -1488,15 +1540,19 @@ async def get_session_info(session_id: str):
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session and free memory"""
-    if TRANSFORM_SERVICE_AVAILABLE:
-        if not session_store.exists(session_id):
-            raise HTTPException(404, "Session not found")
-        session_store.delete(session_id)
-    else:
-        if session_id not in SESSIONS:
-            raise HTTPException(404, "Session not found")
-        del SESSIONS[session_id]
-    
+    link = session_bridge.get(session_id)
+    if not link:
+        raise HTTPException(404, "Session not found")
+
+    parquet_path = CACHE_PATHS.parquet_path(link.user_id, link.dataset_id)
+    if parquet_path.exists():
+        try:
+            parquet_path.unlink()
+        except Exception:
+            pass
+
+    session_bridge.delete(session_id)
+
     return {"message": "Session deleted successfully"}
 
 
@@ -2096,22 +2152,17 @@ def export_data(session_id: str, format: str = "csv"):
 # ===================================================
 @app.on_event("startup")
 async def startup_event():
-    import os
+    missing_env = require_env_vars()
+    settings = load_settings(APP_VERSION)
 
-    port = os.getenv("PORT", "8000")
-
-    print("=" * 70)
-    print("🚀 AI Data Lab v5.0 - Complete Analytics Platform")
-    print("=" * 70)
     print("Features Loaded:")
     print(f"  ✅ Statistical Analysis (Minitab-level)")
     print(f"  ✅ Quality Control (Control Charts, Process Capability)")
     print(f"  ✅ Advanced Analytics (PCA, Clustering, Time Series)")
     print(f"  {'✅' if TRANSFORMS_AVAILABLE else '❌'} Transform Engine (60+ transforms)")
     print(f"  {'✅' if TRANSFORM_SERVICE_AVAILABLE else '❌'} Table Operations (group, pivot, merge)")
-    print("=" * 70)
-    print(f"📚 API Docs: http://0.0.0.0:{port}/docs")
-    print("=" * 70)
+
+    print_startup_banner(settings, missing_env=missing_env)
 
 
 if __name__ == "__main__":

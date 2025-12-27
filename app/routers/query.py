@@ -11,6 +11,7 @@ from app.models.specs import QuerySpec, TableResult
 from app.services.cache_paths import CachePaths
 from app.services.dataset_registry import DatasetRegistry
 from app.services.duckdb_manager import DuckDBManager
+from app.services.parquet_loader import ensure_parquet_local
 from app.services.storage_client import SupabaseStorageClient
 
 router = APIRouter(prefix="/datasets", tags=["query"])
@@ -47,7 +48,7 @@ def run_query(
     user_id: str,
     # IMPORTANT: SQLQueryRequest FIRST so {"sql": "..."} never gets parsed as QuerySpec
     spec: Union[SQLQueryRequest, QuerySpec],
-):
+) -> TableResult:
     # 1) Validate request inputs
     if not user_id:
         raise HTTPException(status_code=422, detail="Missing required query param: user_id")
@@ -65,22 +66,14 @@ def run_query(
                 ),
             )
 
-    # 2) Find dataset + parquet ref
-    registry = DatasetRegistry()
-    ds = registry.get(dataset_id, user_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    parquet_ref = ds.get("parquet_ref")
-    if not parquet_ref:
-        raise HTTPException(status_code=400, detail="Dataset missing parquet_ref")
-
-    # 3) Ensure parquet exists locally
     cache = CachePaths(base_dir=Path("./cache"))
-    parquet_path = cache.parquet_path(user_id, dataset_id)
-    if not parquet_path.exists():
-        storage = SupabaseStorageClient()
-        storage.download_file(parquet_ref, parquet_path)
+    parquet_path, _ds = ensure_parquet_local(
+        dataset_id=dataset_id,
+        user_id=user_id,
+        cache=cache,
+        storage_client=SupabaseStorageClient(),
+        registry=DatasetRegistry(),
+    )
 
     # 4) Execute via DuckDB
     duck = DuckDBManager()
