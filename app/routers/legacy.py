@@ -28,7 +28,7 @@ async def legacy_upload(
     Production frontend still has a fallback path that calls /upload.
     We treat this as a thin wrapper around POST /datasets.
     """
-    dataset_id = await dataset_service.create_dataset_record(user_id, project_id, file.filename, raw_file_ref="")
+    dataset_id = await dataset_service.create_dataset_record(user_id, project_id, file.filename)
     try:
         raw_local, raw_ref = await dataset_service.save_raw_to_storage(user_id, dataset_id, file)
     except Exception as e:

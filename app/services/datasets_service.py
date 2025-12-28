@@ -17,10 +17,13 @@ class DatasetService:
         self.storage = SupabaseStorage()
 
     def _paths(self, user_id: str, dataset_id: str) -> Dict[str, str]:
-        base = f"datasets/{user_id}/{dataset_id}"
+        # IMPORTANT: Match production storage mapping used by your frontend/Supabase tables:
+        #   {user_id}/datasets/{dataset_id}/raw/{filename}
+        #   {user_id}/datasets/{dataset_id}/parquet/data.parquet
+        base = f"{user_id}/datasets/{dataset_id}"
         return {
-            "raw": f"{base}/raw",
-            "parquet": f"{base}/data.parquet",
+            "raw_dir": f"{base}/raw",
+            "parquet": f"{base}/parquet/data.parquet",
         }
 
     def _local_dir(self, user_id: str, dataset_id: str) -> Path:
@@ -28,12 +31,15 @@ class DatasetService:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    async def create_dataset_record(self, user_id: str, project_id: Optional[str], file_name: str, raw_file_ref: str) -> str:
+    async def create_dataset_record(self, user_id: str, project_id: Optional[str], file_name: str) -> str:
         dataset_id = new_dataset_id()
+        paths = self._paths(user_id, dataset_id)
+        raw_ref = f"{paths['raw_dir']}/{file_name}"
+        parquet_ref = paths["parquet"]
         await registry.execute(
-            """INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref)
-               VALUES ($1,$2,$3,$4,$5)""",
-            dataset_id, user_id, project_id, file_name, raw_file_ref
+            """INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref, parquet_ref)
+               VALUES ($1,$2,$3,$4,$5,$6)""",
+            dataset_id, user_id, project_id, file_name, raw_ref, parquet_ref
         )
         return dataset_id
 
@@ -49,7 +55,8 @@ class DatasetService:
 
         # store in Supabase Storage
         paths = self._paths(user_id, dataset_id)
-        raw_ref = f"{paths['raw']}{Path(upload.filename).suffix.lower()}"
+        # Keep original filename for traceability and to match Supabase table refs
+        raw_ref = f"{paths['raw_dir']}/{upload.filename}"
         await self.storage.upload_file(local_raw, raw_ref, upload.content_type or "application/octet-stream")
         return local_raw, raw_ref
 

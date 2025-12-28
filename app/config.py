@@ -18,7 +18,15 @@ class Settings(BaseSettings):
     database_url: str = Field("", alias="DATABASE_URL")  # postgres://...
 
     # Storage bucket
-    bucket_name: str = Field("datasets", alias="SUPABASE_BUCKET")
+    # Accept both env var names to avoid config drift between templates.
+    # Prefer SUPABASE_STORAGE_BUCKET if provided.
+    bucket_name: str = Field("datasets", alias="SUPABASE_STORAGE_BUCKET")
+    bucket_name_fallback: str | None = Field(None, alias="SUPABASE_BUCKET")
+
+    def model_post_init(self, __context):  # type: ignore[override]
+        # Backward compatibility for older env templates using SUPABASE_BUCKET
+        if (not self.bucket_name or self.bucket_name == "datasets") and self.bucket_name_fallback:
+            self.bucket_name = self.bucket_name_fallback
 
     # Backend persistence
     data_dir: str = Field("/data", alias="DATA_DIR")

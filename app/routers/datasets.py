@@ -18,14 +18,14 @@ async def create_dataset(
     # and does not attach an Authorization header.
 
     # Create dataset_id now so we can build storage paths
-    dataset_id = await dataset_service.create_dataset_record(user_id, project_id, file.filename, raw_file_ref="")
+    dataset_id = await dataset_service.create_dataset_record(user_id, project_id, file.filename)
     # Save raw file to disk + Supabase Storage
     try:
         raw_local, raw_ref = await dataset_service.save_raw_to_storage(user_id, dataset_id, file)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Update datasets row with raw ref
+    # raw_file_ref is pre-populated in the INSERT; keep a safety update in case filename differs
     await registry.execute(
         "UPDATE datasets SET raw_file_ref=$2, updated_at=NOW() WHERE dataset_id=$1 AND user_id=$3",
         dataset_id, raw_ref, user_id
