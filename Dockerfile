@@ -1,20 +1,22 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Install system build tools + Fortran compiler (needed if SciPy/statsmodels fall back to source)
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    gfortran \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-ENV PORT=8000
+COPY app ./app
+# COPY knowledge ./knowledge
+
+# Render persistent disk should mount to /data
+ENV DATA_DIR=/data
+RUN mkdir -p /data
+
 EXPOSE 8000
-
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

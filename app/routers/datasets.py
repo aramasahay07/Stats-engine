@@ -1,125 +1,55 @@
 from __future__ import annotations
+from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException
+from app.services.datasets_service import dataset_service
+from app.services import jobs_service
+from app.models.datasets import DatasetCreateResponse, DatasetMetadataResponse, DatasetProfile
+from app.db import registry
 
-import uuid
-from pathlib import Path
-from typing import Optional
-
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from app.services.cache_paths import CachePaths
-from app.services.storage_client import SupabaseStorageClient
-from app.services.parquet_builder import build_parquet
-from app.services.duckdb_manager import DuckDBManager
-from app.services.dataset_registry import DatasetRegistry
-from app.models.specs import DatasetCreateResponse, DatasetProfile
-
-router = APIRouter(prefix="/datasets", tags=["datasets"])
-
-def _content_type_for_filename(name: str) -> str:
-    n = name.lower()
-    if n.endswith(".csv"):
-        return "text/csv"
-    if n.endswith(".parquet"):
-        return "application/octet-stream"
-    if n.endswith(".xlsx") or n.endswith(".xls"):
-        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    return "application/octet-stream"
+router = APIRouter()
 
 @router.post("", response_model=DatasetCreateResponse)
 async def create_dataset(
+    background: BackgroundTasks,
     file: UploadFile = File(...),
     user_id: str = Form(...),
-    project_id: Optional[str] = Form(None),
+    project_id: str | None = Form(None),
 ):
-    """Create durable dataset: raw upload + parquet + profile + registry row.
+    # NOTE: The current production frontend sends user_id as a form field
+    # and does not attach an Authorization header.
 
-    This replaces in-memory session_store. The returned dataset_id is permanent.
-    """
-    dataset_id = str(uuid.uuid4())
-
-    cache = CachePaths(base_dir=Path("./cache"))
-    raw_path = cache.raw_path(user_id, dataset_id, file.filename)
-    parquet_path = cache.parquet_path(user_id, dataset_id)
-
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    parquet_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Save raw file locally
-    raw_bytes = await file.read()
-    raw_path.write_bytes(raw_bytes)
-
-    storage = SupabaseStorageClient()
-    registry = DatasetRegistry()
-    duck = DuckDBManager()
-
-    # Upload raw to storage
-    raw_ref = f"{user_id}/datasets/{dataset_id}/raw/{file.filename}"
+    # Create dataset_id now so we can build storage paths
+    dataset_id = await dataset_service.create_dataset_record(user_id, project_id, file.filename, raw_file_ref="")
+    # Save raw file to disk + Supabase Storage
     try:
-        storage.upload_file(raw_path, raw_ref, content_type=_content_type_for_filename(file.filename))
+        raw_local, raw_ref = await dataset_service.save_raw_to_storage(user_id, dataset_id, file)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload raw file: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # Build parquet and upload
-    try:
-        build_parquet(raw_path, parquet_path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse/convert file: {e}")
-
-    parquet_ref = f"{user_id}/datasets/{dataset_id}/parquet/data.parquet"
-    try:
-        storage.upload_file(parquet_path, parquet_ref, content_type=_content_type_for_filename("data.parquet"))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload parquet: {e}")
-
-    # Profile via DuckDB
-    prof = duck.profile_parquet(parquet_path, sample_n=100)
-    schema = prof["schema"]
-    missing_summary = prof["missing_summary"]
-    sample_rows = prof["sample_rows"]
-
-    n_rows = prof["n_rows"]
-    n_cols = len(schema)
-
-    # Write registry row
-    row = {
-        "dataset_id": dataset_id,
-        "user_id": user_id,
-        "project_id": project_id,
-        "file_name": file.filename,
-        "raw_file_ref": raw_ref,
-        "parquet_ref": parquet_ref,
-        "n_rows": n_rows,
-        "n_cols": n_cols,
-        "schema_json": schema,
-        "profile_json": {
-            "missing_summary": missing_summary,
-        },
-    }
-    try:
-        registry.create(row)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create dataset row: {e}")
-
-    profile = DatasetProfile(
-        dataset_id=dataset_id,
-        n_rows=n_rows,
-        n_cols=n_cols,
-        schema=schema,
-        missing_summary=missing_summary,
-        sample_rows=sample_rows,
+    # Update datasets row with raw ref
+    await registry.execute(
+        "UPDATE datasets SET raw_file_ref=$2, updated_at=NOW() WHERE dataset_id=$1 AND user_id=$3",
+        dataset_id, raw_ref, user_id
     )
 
-    return DatasetCreateResponse(
-        dataset_id=dataset_id,
-        raw_file_ref=raw_ref,
-        parquet_ref=parquet_ref,
-        profile=profile,
-    )
+    job_id = await jobs_service.create_job(user_id, dataset_id, "build_parquet_profile")
+    background.add_task(dataset_service.build_parquet_and_profile, user_id, dataset_id, raw_local, raw_ref, job_id)
 
-@router.get("/{dataset_id}")
-def get_dataset(dataset_id: str, user_id: str):
-    """Rehydrate UI anytime: returns dataset metadata from registry."""
-    registry = DatasetRegistry()
-    ds = registry.get(dataset_id, user_id)
-    if not ds:
+    # return an initial lightweight profile (rows/cols unknown yet)
+    profile = DatasetProfile(n_rows=0, n_cols=0, schema=[], sample_rows=[])
+    return DatasetCreateResponse(dataset_id=dataset_id, profile=profile, job_id=job_id)
+
+@router.get("/{dataset_id}", response_model=DatasetMetadataResponse)
+async def get_dataset(dataset_id: str, user_id: str):
+    row = await registry.fetchrow("SELECT * FROM datasets WHERE dataset_id=$1 AND user_id=$2", dataset_id, user_id)
+    if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    return ds
+    return DatasetMetadataResponse(
+        dataset_id=row["dataset_id"],
+        file_name=row["file_name"],
+        n_rows=int(row["n_rows"] or 0),
+        n_cols=int(row["n_cols"] or 0),
+        schema_json=row["schema_json"],
+        profile_json=row["profile_json"],
+        raw_file_ref=row["raw_file_ref"],
+        parquet_ref=row["parquet_ref"],
+    )
