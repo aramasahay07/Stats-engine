@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.routers.legacy import router as legacy_router
 from app.config import settings
+from app.db.registry import close_pool
 
 
 def create_app() -> FastAPI:
@@ -25,6 +26,11 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     # Temporary legacy aliases (session routes that are still referenced by edge/frontend)
     app.include_router(legacy_router)
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        # Gracefully close asyncpg pool to avoid dangling connections on redeploy.
+        await close_pool()
 
     @app.get("/health")
     async def health():

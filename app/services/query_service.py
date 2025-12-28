@@ -101,15 +101,13 @@ def build_query_sql(view: str, spec: QuerySpec) -> str:
     return sql
 
 async def run_query(user_id: str, dataset_id: str, spec: QuerySpec) -> Dict[str, Any]:
-    # ============ INSERT THIS CODE BLOCK HERE ============
-    # Smart limit adjustment for data integrity
-    # If this is a raw data query (no aggregation), ensure limit is sufficient
-    if not spec.measures and not spec.groupby:
-        # This is a raw data query, not an aggregation
-        # Ensure limit is high enough to avoid incomplete results
-        if spec.limit < 100000:
-            spec.limit = 1000000  # Match your new default
-    # ============ END OF INSERTED CODE ============
+    # Safety clamp: never stream huge raw datasets into JSON.
+    # For large result sets, use /query/export instead.
+    max_rows = int(__import__('os').getenv('MAX_QUERY_ROWS', '10000'))
+    if spec.limit is None or spec.limit <= 0:
+        spec.limit = min(1000, max_rows)
+    if spec.limit > max_rows:
+        spec.limit = max_rows
     parquet_local = await _ensure_parquet_local(user_id, dataset_id)
     eng = DuckDBEngine(user_id)
     con = eng.connect()
