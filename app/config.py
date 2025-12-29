@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     supabase_url: str = Field("", alias="SUPABASE_URL")
     supabase_service_role_key: str = Field("", alias="SUPABASE_SERVICE_ROLE_KEY")
     supabase_jwt_audience: str = Field("authenticated", alias="SUPABASE_JWT_AUD")
+    supabase_storage_bucket: str = Field("datasets", alias="SUPABASE_STORAGE_BUCKET")
+
 
     # Postgres (Supabase)
     database_url: str = Field("", alias="DATABASE_URL")  # postgres://...
