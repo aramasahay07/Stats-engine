@@ -53,6 +53,26 @@ class SupabaseStorage:
             raise RuntimeError(
                 f"Supabase upload failed: {resp.status_code} {resp.text}"
             )
+    async def download(self, object_path: str) -> bytes:
+        """
+        Download a Storage object and return its bytes.
+
+        Equivalent semantics to:
+        supabase.storage.from_(bucket).download(object_path)
+        """
+        url = f"{self.base}/storage/v1/object/{self.bucket}/{object_path.lstrip('/')}"
+        headers = {
+            "Authorization": f"Bearer {self.key}",
+            "apikey": self.key,
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.get(url, headers=headers)
+
+        if resp.status_code != 200:
+            raise RuntimeError(f"Supabase download failed: {resp.status_code} {resp.text}")
+
+        return resp.content
 
     async def delete_object(self, object_path: str) -> None:
         url = f"{self.base}/storage/v1/object/{self.bucket}/{object_path.lstrip('/')}"

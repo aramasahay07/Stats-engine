@@ -34,14 +34,27 @@ from app.engine.duckdb_engine import DuckDBEngine
 # HELPER FUNCTIONS
 # ============================================================================
 
+import json
+import hashlib
+from pathlib import Path
+from typing import Dict, Any
+
+from app.config import settings
+from app.db import registry
+
+
 def _hash_spec(dataset_id: str, analysis: str, params: Dict[str, Any]) -> str:
     """
     Create a unique hash for caching purposes.
     Same analysis on same data always produces same hash.
     """
     payload = json.dumps(
-        {"dataset_id": dataset_id, "analysis": analysis, "params": params},
-        sort_keys=True
+        {
+            "dataset_id": dataset_id,
+            "analysis": analysis,
+            "params": params,
+        },
+        sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -52,25 +65,53 @@ def _quote(c: str) -> str:
 
 
 async def _get_parquet_local(user_id: str, dataset_id: str) -> Path:
-    """Ensure the dataset parquet exists locally.
-
-    Source of truth is Supabase Storage (datasets.parquet_ref). We download on-demand
-    using the service role key (server-side) and cache under DATA_DIR.
     """
-    p = Path(settings.data_dir) / "datasets" / user_id / dataset_id / "data.parquet"
+    Ensure the dataset parquet exists locally.
+
+    Source of truth is Supabase Storage (datasets.parquet_ref).
+    We download on-demand using the service role key (server-side)
+    and cache under DATA_DIR.
+    """
+
+    p = (
+        Path(settings.data_dir)
+        / "datasets"
+        / user_id
+        / dataset_id
+        / "data.parquet"
+    )
+
+    # ✅ Fast path: already cached locally
     if p.exists():
         return p
 
+    # 🔍 Fetch parquet reference from DB
     row = await registry.fetchrow(
-        "SELECT parquet_ref FROM datasets WHERE dataset_id=$1 AND user_id=$2",
-        dataset_id, user_id,
+        """
+        SELECT parquet_ref
+        FROM datasets
+        WHERE dataset_id = $1
+          AND user_id = $2
+        """,
+        dataset_id,
+        user_id,
     )
-    if not row or not row.get("parquet_ref"):
-        raise FileNotFoundError("Parquet artifact not found. Dataset parquet_ref is missing (still building?).")
 
+    if not row or not row["parquet_ref"]:
+        raise FileNotFoundError(
+            "Parquet artifact not found. Dataset parquet_ref is missing (still building?)."
+        )
+
+    # ⬇️ Download from Supabase Storage
     from app.services.storage_supabase import SupabaseStorage
+
     storage = SupabaseStorage()
-    await storage.download_to_file(row["parquet_ref"], p)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    file_bytes = await storage.download(row["parquet_ref"])
+    p.write_bytes(file_bytes)
+
     return p
 
 

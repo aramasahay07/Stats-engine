@@ -35,7 +35,11 @@ async def _ensure_parquet_local(user_id: str, dataset_id: str) -> Path:
 
     from app.services.storage_supabase import SupabaseStorage
     storage = SupabaseStorage()
-    await storage.download_to_file(row["parquet_ref"], p)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    file_bytes = await storage.download(row["parquet_ref"])
+    p.write_bytes(file_bytes)
+
     return p
 
 def build_query_sql(view: str, spec: QuerySpec) -> str:
