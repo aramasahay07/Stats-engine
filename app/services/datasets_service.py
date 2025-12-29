@@ -37,6 +37,9 @@ class DatasetService:
         dataset_id MUST be a UUID string because:
           - datasets.dataset_id is UUID
           - jobs.dataset_id is UUID
+
+        NOTE:
+        datasets.user_id is TEXT in your DB, so we do NOT cast $2 to uuid.
         """
         dataset_id = str(uuid4())
 
@@ -44,7 +47,6 @@ class DatasetService:
         raw_ref = f"{paths['raw_dir']}/{file_name}"
         parquet_ref = paths["parquet"]
 
-        # NOTE: datasets.user_id is TEXT in your DB, so DO NOT cast $2 to uuid
         await registry.execute(
             """
             INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref, parquet_ref)
@@ -72,7 +74,11 @@ class DatasetService:
 
         paths = self._paths(user_id, dataset_id)
         raw_ref = f"{paths['raw_dir']}/{upload.filename}"
-        await self.storage.upload_file(local_raw, raw_ref, upload.content_type or "application/octet-stream")
+        await self.storage.upload_file(
+            local_raw,
+            raw_ref,
+            upload.content_type or "application/octet-stream",
+        )
         return local_raw, raw_ref
 
     async def build_parquet_and_profile(
@@ -81,68 +87,94 @@ class DatasetService:
         dataset_id: str,
         raw_local: Path,
         raw_ref: str,
-        job_id: str
+        job_id: str,
     ) -> Dict[str, Any]:
-        await jobs_service.update_job(job_id, "running", 5, "starting ingest")
+        """
+        Background task:
+          1) convert raw -> parquet
+          2) upload parquet
+          3) profile parquet via DuckDB
+          4) persist metadata into datasets table
+        """
+        try:
+            await jobs_service.update_job(job_id, "running", 5, "starting ingest")
 
-        local_dir = self._local_dir(user_id, dataset_id)
-        parquet_local = local_dir / "data.parquet"
+            local_dir = self._local_dir(user_id, dataset_id)
+            parquet_local = local_dir / "data.parquet"
 
-        suffix = raw_local.suffix.lower()
-        if suffix == ".csv":
-            await jobs_service.update_job(job_id, "running", 15, "converting csv to parquet")
-            _n_rows, _n_cols = csv_to_parquet_streaming(raw_local, parquet_local)
+            suffix = raw_local.suffix.lower()
+            if suffix == ".csv":
+                await jobs_service.update_job(job_id, "running", 15, "converting csv to parquet")
+                _n_rows, _n_cols = csv_to_parquet_streaming(raw_local, parquet_local)
 
-        elif suffix in [".xlsx", ".xls"]:
-            await jobs_service.update_job(job_id, "running", 15, "converting excel to parquet")
-            _n_rows, _n_cols = xlsx_to_parquet(raw_local, parquet_local)
+            elif suffix in [".xlsx", ".xls"]:
+                await jobs_service.update_job(job_id, "running", 15, "converting excel to parquet")
+                _n_rows, _n_cols = xlsx_to_parquet(raw_local, parquet_local)
 
-        elif suffix == ".parquet":
-            await jobs_service.update_job(job_id, "running", 15, "copying parquet")
-            _n_rows, _n_cols = parquet_copy(raw_local, parquet_local)
+            elif suffix == ".parquet":
+                await jobs_service.update_job(job_id, "running", 15, "copying parquet")
+                _n_rows, _n_cols = parquet_copy(raw_local, parquet_local)
 
-        else:
-            raise ValueError(f"Unsupported file type: {suffix}")
+            else:
+                raise ValueError(f"Unsupported file type: {suffix}")
 
-        await jobs_service.update_job(job_id, "running", 55, "uploading parquet")
+            await jobs_service.update_job(job_id, "running", 55, "uploading parquet")
 
-        paths = self._paths(user_id, dataset_id)
-        parquet_ref = paths["parquet"]
-        await self.storage.upload_file(parquet_local, parquet_ref, "application/octet-stream")
+            paths = self._paths(user_id, dataset_id)
+            parquet_ref = paths["parquet"]
+            await self.storage.upload_file(parquet_local, parquet_ref, "application/octet-stream")
 
-        await jobs_service.update_job(job_id, "running", 70, "profiling")
+            await jobs_service.update_job(job_id, "running", 70, "profiling")
 
-        eng = DuckDBEngine(user_id)
-        con = eng.connect()
-        base_view = eng.register_parquet(con, dataset_id, parquet_local)
-        profile = build_profile_from_duckdb(con, base_view)
-        con.close()
+            eng = DuckDBEngine(user_id)
+            con = eng.connect()
+            base_view = eng.register_parquet(con, dataset_id, parquet_local)
+            profile = build_profile_from_duckdb(con, base_view)
+            con.close()
 
-        await jobs_service.update_job(job_id, "running", 90, "saving metadata")
+            await jobs_service.update_job(job_id, "running", 90, "saving metadata")
 
-        await registry.execute(
-            """
-            UPDATE datasets
-            SET parquet_ref=$2,
-                n_rows=$3,
-                n_cols=$4,
-                schema_json=$5,
-                profile_json=$6,
-                updated_at=NOW()
-            WHERE dataset_id=$1::uuid
-            """,
-            dataset_id,
-            parquet_ref,
-            profile.get("n_rows"),
-            profile.get("n_cols"),
-            profile.get("schema"),
-            profile,
-        )
+            # IMPORTANT: update by dataset_id only (reliable), not by user_id
+            result = await registry.execute(
+                """
+                UPDATE datasets
+                SET parquet_ref=$2,
+                    n_rows=$3,
+                    n_cols=$4,
+                    schema_json=$5,
+                    profile_json=$6,
+                    updated_at=NOW()
+                WHERE dataset_id=$1::uuid
+                """,
+                dataset_id,
+                parquet_ref,
+                profile.get("n_rows"),
+                profile.get("n_cols"),
+                profile.get("schema"),
+                profile,
+            )
 
+            # asyncpg returns a string like "UPDATE 1"
+            if not str(result).endswith("1"):
+                await jobs_service.update_job(
+                    job_id,
+                    "failed",
+                    100,
+                    f"dataset update failed: {result}",
+                )
+                raise RuntimeError(f"Dataset update failed: {result}")
 
-# asyncpg returns like "UPDATE 1"
-if not str(result).endswith("1"):
-    await jobs_service.update_job(job_id, "failed", 100, f"dataset update failed: {result}")
-    raise RuntimeError(f"Dataset update failed: {result}")
+            await jobs_service.update_job(job_id, "done", 100, "complete", {"profile": profile})
+            return profile
+
+        except Exception as e:
+            # Ensure job is marked failed instead of stuck at running/90
+            try:
+                await jobs_service.update_job(job_id, "failed", 100, f"{type(e).__name__}: {e}")
+            except Exception:
+                # Don't mask original exception if job update also fails
+                pass
+            raise
+
 
 dataset_service = DatasetService()
