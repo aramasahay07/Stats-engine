@@ -65,18 +65,6 @@ async def create_dataset(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Update raw reference
-    await registry.execute(
-        """
-        UPDATE datasets
-        SET raw_file_ref=$2, updated_at=NOW()
-        WHERE dataset_id=$1 AND user_id=$3
-        """,
-        dataset_id,
-        raw_ref,
-        user_id,
-    )
-
     # Debug logging (safe to keep during stabilization)
     print("DEBUG user_id:", user_id)
     print("DEBUG dataset_id:", dataset_id, "len=", len(str(dataset_id)))
@@ -132,16 +120,22 @@ async def get_dataset(dataset_id: str, user_id: str):
         dataset_id,
         user_id,
     )
+
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    schema = row["schema_json"] or []
+    profile = row["profile_json"] or {}
+
     return DatasetMetadataResponse(
-        dataset_id=row["dataset_id"],
+        dataset_id=str(row["dataset_id"]),
+        user_id=row["user_id"],
+        project_id=row["project_id"],
         file_name=row["file_name"],
-        n_rows=int(row["n_rows"] or 0),
-        n_cols=int(row["n_cols"] or 0),
-        schema_json=row["schema_json"],
-        profile_json=row["profile_json"],
         raw_file_ref=row["raw_file_ref"],
         parquet_ref=row["parquet_ref"],
+        n_rows=int(row["n_rows"] or 0),
+        n_cols=int(row["n_cols"] or 0),
+        schema=schema,
+        profile=profile,
     )
