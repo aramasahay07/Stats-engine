@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from uuid import UUID
+
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile
 
 from app.db import registry
@@ -28,7 +30,15 @@ async def legacy_upload(
     Production frontend still has a fallback path that calls /upload.
     We treat this as a thin wrapper around POST /datasets.
     """
-    dataset_id = await dataset_service.create_dataset_record(user_id, project_id, file.filename)
+    # project_id is optional and should be a UUID when provided.
+    project_uuid: Optional[UUID] = None
+    if project_id and project_id.strip() not in ("", "string", "null", "None"):
+        try:
+            project_uuid = UUID(project_id.strip())
+        except Exception:
+            raise HTTPException(status_code=400, detail="project_id must be a valid UUID or omitted")
+
+    dataset_id = await dataset_service.create_dataset_record(user_id, project_uuid, file.filename)
     try:
         raw_local, raw_ref = await dataset_service.save_raw_to_storage(user_id, dataset_id, file)
     except Exception as e:
