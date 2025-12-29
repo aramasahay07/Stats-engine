@@ -1,10 +1,8 @@
 from __future__ import annotations
-
+import json  # (top of file)
 from uuid import UUID
 from typing import Optional
-
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException
-
 from app.services.datasets_service import dataset_service
 from app.services import jobs_service
 from app.models.datasets import (
@@ -24,11 +22,9 @@ def _normalize_optional_uuid(value: str | None) -> Optional[UUID]:
     """
     if value is None:
         return None
-
     v = value.strip()
     if v in ("", "string", "null", "None"):
         return None
-
     try:
         return UUID(v)
     except Exception:
@@ -47,14 +43,14 @@ async def create_dataset(
 ):
     # Normalize project_id
     project_uuid = _normalize_optional_uuid(project_id)
-
+    
     # Create dataset record (dataset_id MUST be UUID string)
     dataset_id = await dataset_service.create_dataset_record(
         user_id,
         project_uuid,
         file.filename,
     )
-
+    
     # Save raw file
     try:
         raw_local, raw_ref = await dataset_service.save_raw_to_storage(
@@ -64,12 +60,12 @@ async def create_dataset(
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
+    
     # Debug logging (safe to keep during stabilization)
     print("DEBUG user_id:", user_id)
     print("DEBUG dataset_id:", dataset_id, "len=", len(str(dataset_id)))
     print("DEBUG project_id:", project_uuid)
-
+    
     # Create background job
     try:
         job_id = await jobs_service.create_job(
@@ -82,7 +78,7 @@ async def create_dataset(
             status_code=400,
             detail=f"create_job failed: {type(e).__name__}: {e}",
         )
-
+    
     # Launch background processing
     background.add_task(
         dataset_service.build_parquet_and_profile,
@@ -92,7 +88,7 @@ async def create_dataset(
         raw_ref,
         job_id,
     )
-
+    
     # Initial empty profile (real one will be populated asynchronously)
     profile = DatasetProfile(
         n_rows=0,
@@ -100,7 +96,7 @@ async def create_dataset(
         schema=[],
         sample_rows=[],
     )
-
+    
     return DatasetCreateResponse(
         dataset_id=dataset_id,
         profile=profile,
@@ -124,8 +120,21 @@ async def get_dataset(dataset_id: str, user_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    schema_json = row["schema_json"] or []
-    profile_json = row["profile_json"] or {}
+    schema_json = row["schema_json"] or "[]"
+    profile_json = row["profile_json"] or "{}"
+
+    # Handle TEXT or JSONB transparently
+    if isinstance(schema_json, str):
+        try:
+            schema_json = json.loads(schema_json)
+        except Exception:
+            schema_json = []
+
+    if isinstance(profile_json, str):
+        try:
+            profile_json = json.loads(profile_json)
+        except Exception:
+            profile_json = {}
 
     return DatasetMetadataResponse(
         dataset_id=str(row["dataset_id"]),
