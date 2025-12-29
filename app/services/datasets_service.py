@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 from uuid import uuid4, UUID
-
+import json
 from fastapi import UploadFile
 
 from app.config import settings
@@ -133,14 +133,17 @@ class DatasetService:
             schema_obj = profile.get("schema") or []
             profile_obj = profile or {}
 
+            schema_payload = json.dumps(schema_obj)
+            profile_payload = json.dumps(profile_obj)
+
             result = await registry.execute(
                 """
                 UPDATE datasets
                 SET parquet_ref = $2,
                     n_rows = $3,
                     n_cols = $4,
-                    schema_json = $5::jsonb,
-                    profile_json = $6::jsonb,
+                    schema_json = $5,
+                    profile_json = $6,
                     updated_at = NOW()
                 WHERE dataset_id = $1::uuid
                 """,
@@ -148,11 +151,10 @@ class DatasetService:
                 parquet_ref,
                 int(profile.get("n_rows") or 0),
                 int(profile.get("n_cols") or 0),
-                schema_obj,
-                profile_obj,
+                schema_payload,
+                profile_payload,
             )
 
-            # asyncpg returns "UPDATE 1"
             if not str(result).endswith("1"):
                 await jobs_service.update_job(
                     job_id,
