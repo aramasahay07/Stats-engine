@@ -129,7 +129,7 @@ class DatasetService:
                 schema_json=$5,
                 profile_json=$6,
                 updated_at=NOW()
-            WHERE dataset_id=$1::uuid 
+            WHERE dataset_id=$1::uuid
             """,
             dataset_id,
             parquet_ref,
@@ -139,8 +139,10 @@ class DatasetService:
             profile,
         )
 
-        await jobs_service.update_job(job_id, "done", 100, "complete", {"profile": profile})
-        return profile
 
+# asyncpg returns like "UPDATE 1"
+if not str(result).endswith("1"):
+    await jobs_service.update_job(job_id, "failed", 100, f"dataset update failed: {result}")
+    raise RuntimeError(f"Dataset update failed: {result}")
 
 dataset_service = DatasetService()
