@@ -47,7 +47,7 @@ class DatasetService:
         await registry.execute(
             """
             INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref, parquet_ref)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
             """,
             dataset_id, user_id, project_id, file_name, raw_ref, parquet_ref
         )
@@ -123,7 +123,7 @@ class DatasetService:
                 schema_json=$5,
                 profile_json=$6,
                 updated_at=NOW()
-            WHERE dataset_id=$1 AND user_id=$7
+            WHERE dataset_id=$1::uuid AND user_id::text=$7
             """,
             dataset_id,
             parquet_ref,
