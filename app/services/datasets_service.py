@@ -33,7 +33,6 @@ class DatasetService:
 
     async def create_dataset_record(self, user_id: str, project_id: Optional[UUID], file_name: str) -> str:
         """
-        IMPORTANT:
         dataset_id MUST be a UUID string because:
           - datasets.dataset_id is UUID
           - jobs.dataset_id is UUID
@@ -106,15 +105,12 @@ class DatasetService:
             if suffix == ".csv":
                 await jobs_service.update_job(job_id, "running", 15, "converting csv to parquet")
                 _n_rows, _n_cols = csv_to_parquet_streaming(raw_local, parquet_local)
-
             elif suffix in [".xlsx", ".xls"]:
                 await jobs_service.update_job(job_id, "running", 15, "converting excel to parquet")
                 _n_rows, _n_cols = xlsx_to_parquet(raw_local, parquet_local)
-
             elif suffix == ".parquet":
                 await jobs_service.update_job(job_id, "running", 15, "copying parquet")
                 _n_rows, _n_cols = parquet_copy(raw_local, parquet_local)
-
             else:
                 raise ValueError(f"Unsupported file type: {suffix}")
 
@@ -134,27 +130,29 @@ class DatasetService:
 
             await jobs_service.update_job(job_id, "running", 90, "saving metadata")
 
-            # IMPORTANT: update by dataset_id only (reliable), not by user_id
+            schema_obj = profile.get("schema") or []
+            profile_obj = profile or {}
+
             result = await registry.execute(
                 """
                 UPDATE datasets
-                SET parquet_ref=$2,
-                    n_rows=$3,
-                    n_cols=$4,
-                    schema_json=$5,
-                    profile_json=$6,
-                    updated_at=NOW()
-                WHERE dataset_id=$1::uuid
+                SET parquet_ref = $2,
+                    n_rows = $3,
+                    n_cols = $4,
+                    schema_json = $5::jsonb,
+                    profile_json = $6::jsonb,
+                    updated_at = NOW()
+                WHERE dataset_id = $1::uuid
                 """,
                 dataset_id,
                 parquet_ref,
-                profile.get("n_rows"),
-                profile.get("n_cols"),
-                profile.get("schema"),
-                profile,
+                int(profile.get("n_rows") or 0),
+                int(profile.get("n_cols") or 0),
+                schema_obj,
+                profile_obj,
             )
 
-            # asyncpg returns a string like "UPDATE 1"
+            # asyncpg returns "UPDATE 1"
             if not str(result).endswith("1"):
                 await jobs_service.update_job(
                     job_id,
@@ -172,7 +170,6 @@ class DatasetService:
             try:
                 await jobs_service.update_job(job_id, "failed", 100, f"{type(e).__name__}: {e}")
             except Exception:
-                # Don't mask original exception if job update also fails
                 pass
             raise
 

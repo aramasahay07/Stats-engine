@@ -124,18 +124,18 @@ async def get_dataset(dataset_id: str, user_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    schema = row["schema_json"] or []
-    profile = row["profile_json"] or {}
+    schema_json = row["schema_json"] or []
+    profile_json = row["profile_json"] or {}
 
     return DatasetMetadataResponse(
         dataset_id=str(row["dataset_id"]),
         user_id=row["user_id"],
-        project_id=row["project_id"],
+        project_id=str(row["project_id"]) if row["project_id"] else None,
         file_name=row["file_name"],
         raw_file_ref=row["raw_file_ref"],
         parquet_ref=row["parquet_ref"],
         n_rows=int(row["n_rows"] or 0),
         n_cols=int(row["n_cols"] or 0),
-        schema=schema,
-        profile=profile,
+        schema_json=schema_json,
+        profile_json=profile_json,
     )
