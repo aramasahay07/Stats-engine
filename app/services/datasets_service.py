@@ -142,8 +142,8 @@ class DatasetService:
                 SET parquet_ref = $2,
                     n_rows = $3,
                     n_cols = $4,
-                    schema_json = $5,
-                    profile_json = $6,
+                    schema_json = $5::jsonb,
+                    profile_json = $6::jsonb,
                     updated_at = NOW()
                 WHERE dataset_id = $1::uuid
                 """,
@@ -151,8 +151,8 @@ class DatasetService:
                 parquet_ref,
                 int(profile.get("n_rows") or 0),
                 int(profile.get("n_cols") or 0),
-                schema_payload,
-                profile_payload,
+                profile.get("schema") or [],
+                profile or {},
             )
 
             if not str(result).endswith("1"):
