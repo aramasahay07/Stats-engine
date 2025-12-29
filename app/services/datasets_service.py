@@ -34,8 +34,9 @@ class DatasetService:
     async def create_dataset_record(self, user_id: str, project_id: Optional[UUID], file_name: str) -> str:
         """
         IMPORTANT:
-        - dataset_id MUST be a UUID string because downstream jobs.dataset_id is UUID.
-        - project_id must be UUID or None (datasets.project_id is uuid).
+        dataset_id MUST be a UUID string because:
+          - datasets.dataset_id is UUID
+          - jobs.dataset_id is UUID
         """
         dataset_id = str(uuid4())
 
@@ -44,8 +45,10 @@ class DatasetService:
         parquet_ref = paths["parquet"]
 
         await registry.execute(
-            """INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref, parquet_ref)
-               VALUES ($1,$2,$3,$4,$5,$6)""",
+            """
+            INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref, parquet_ref)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
             dataset_id, user_id, project_id, file_name, raw_ref, parquet_ref
         )
         return dataset_id
@@ -82,15 +85,15 @@ class DatasetService:
         suffix = raw_local.suffix.lower()
         if suffix == ".csv":
             await jobs_service.update_job(job_id, "running", 15, "converting csv to parquet")
-            n_rows, n_cols = csv_to_parquet_streaming(raw_local, parquet_local)
+            _n_rows, _n_cols = csv_to_parquet_streaming(raw_local, parquet_local)
 
         elif suffix in [".xlsx", ".xls"]:
             await jobs_service.update_job(job_id, "running", 15, "converting excel to parquet")
-            n_rows, n_cols = xlsx_to_parquet(raw_local, parquet_local)
+            _n_rows, _n_cols = xlsx_to_parquet(raw_local, parquet_local)
 
         elif suffix == ".parquet":
             await jobs_service.update_job(job_id, "running", 15, "copying parquet")
-            n_rows, n_cols = parquet_copy(raw_local, parquet_local)
+            _n_rows, _n_cols = parquet_copy(raw_local, parquet_local)
 
         else:
             raise ValueError(f"Unsupported file type: {suffix}")
@@ -112,10 +115,23 @@ class DatasetService:
         await jobs_service.update_job(job_id, "running", 90, "saving metadata")
 
         await registry.execute(
-            """UPDATE datasets
-               SET parquet_ref=$2, n_rows=$3, n_cols=$4, schema_json=$5, profile_json=$6, updated_at=NOW()
-               WHERE dataset_id=$1 AND user_id=$7""",
-            dataset_id, parquet_ref, profile["n_rows"], profile["n_cols"], profile["schema"], profile, user_id
+            """
+            UPDATE datasets
+            SET parquet_ref=$2,
+                n_rows=$3,
+                n_cols=$4,
+                schema_json=$5,
+                profile_json=$6,
+                updated_at=NOW()
+            WHERE dataset_id=$1 AND user_id=$7
+            """,
+            dataset_id,
+            parquet_ref,
+            profile.get("n_rows"),
+            profile.get("n_cols"),
+            profile.get("schema"),
+            profile,
+            user_id,
         )
 
         await jobs_service.update_job(job_id, "done", 100, "complete", {"profile": profile})

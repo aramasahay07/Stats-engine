@@ -34,7 +34,7 @@ async def create_dataset(
 ):
     project_uuid = _normalize_optional_uuid(project_id)
 
-    # ✅ dataset_id will now always be a real UUID string
+    # ✅ dataset_id is now ALWAYS a UUID string
     dataset_id = await dataset_service.create_dataset_record(user_id, project_uuid, file.filename)
 
     try:
