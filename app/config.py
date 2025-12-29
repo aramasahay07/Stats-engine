@@ -1,46 +1,68 @@
 import os
+from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    """
+    Central config loaded from environment variables (Railway) and optionally .env (local).
+    """
 
-    # Supabase
-    # Defaults allow local import / unit tests without env.
-    # Deployment must set these.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # -------------------------
+    # Supabase (required in prod)
+    # -------------------------
     supabase_url: str = Field("", alias="SUPABASE_URL")
     supabase_service_role_key: str = Field("", alias="SUPABASE_SERVICE_ROLE_KEY")
     supabase_jwt_audience: str = Field("authenticated", alias="SUPABASE_JWT_AUD")
-    supabase_storage_bucket: str = Field("datasets", alias="SUPABASE_STORAGE_BUCKET")
 
-
+    # -------------------------
     # Postgres (Supabase)
-    database_url: str = Field("", alias="DATABASE_URL")  # postgres://...
+    # -------------------------
+    database_url: str = Field("", alias="DATABASE_URL")
 
-    # Storage bucket
-    # Accept both env var names to avoid config drift between templates.
-    # Prefer SUPABASE_STORAGE_BUCKET if provided.
-    bucket_name: str = Field("datasets", alias="SUPABASE_STORAGE_BUCKET")
-    bucket_name_fallback: str | None = Field(None, alias="SUPABASE_BUCKET")
+    # -------------------------
+    # Supabase Storage bucket
+    # Railway variable you showed: SUPABASE_STORAGE_BUCKET
+    # Also accept older fallback: SUPABASE_BUCKET
+    # -------------------------
+    supabase_storage_bucket: str = Field("datasets", alias="SUPABASE_STORAGE_BUCKET")
+    supabase_bucket_fallback: Optional[str] = Field(None, alias="SUPABASE_BUCKET")
 
-    def model_post_init(self, __context):  # type: ignore[override]
-        # Backward compatibility for older env templates using SUPABASE_BUCKET
-        if (not self.bucket_name or self.bucket_name == "datasets") and self.bucket_name_fallback:
-            self.bucket_name = self.bucket_name_fallback
-
-    # Backend persistence
+    # -------------------------
+    # Backend persistence (local disk / container)
+    # -------------------------
     data_dir: str = Field("/data", alias="DATA_DIR")
 
-    # OpenAI (optional here; often used in edge functions)
-    openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
+    # -------------------------
+    # OpenAI (optional)
+    # -------------------------
+    openai_api_key: Optional[str] = Field(None, alias="OPENAI_API_KEY")
 
+    # -------------------------
     # CORS
+    # If Railway env sets CORS_ALLOW_ORIGINS as a comma-separated string,
+    # Pydantic can parse list formats; simplest is to keep ["*"] by default.
+    # -------------------------
     cors_allow_origins: List[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
+
+    def model_post_init(self, __context) -> None:
+        """
+        Normalize bucket selection: if SUPABASE_STORAGE_BUCKET is not set but SUPABASE_BUCKET is,
+        use the fallback.
+        """
+        if (not self.supabase_storage_bucket or self.supabase_storage_bucket.strip() == "") and self.supabase_bucket_fallback:
+            self.supabase_storage_bucket = self.supabase_bucket_fallback.strip()
+
 
 settings = Settings()
 
-
 # Local/MVP only: bypass JWT verification
-AUTH_DISABLED = os.getenv('AUTH_DISABLED', 'false').lower() == 'true'
+AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"

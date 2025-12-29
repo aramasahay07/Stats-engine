@@ -1,33 +1,63 @@
-import httpx
+from __future__ import annotations
+
 from pathlib import Path
+import httpx
+
 from app.config import settings
 
+
 class SupabaseStorage:
+    """
+    Minimal async Supabase Storage client using REST API.
+    Fixes httpx error: 'Attempted to send a sync request with an AsyncClient instance.'
+    """
+
     def __init__(self):
+        if not settings.supabase_url:
+            raise RuntimeError("SUPABASE_URL is not set")
+        if not settings.supabase_service_role_key:
+            raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is not set")
+
+        # If you have SUPABASE_STORAGE_BUCKET in Railway, add it to config.py
+        # For now default to "datasets"
+        self.bucket = getattr(settings, "supabase_storage_bucket", "datasets")
+
         self.base = settings.supabase_url.rstrip("/")
-        self.bucket = settings.bucket_name
-        self.headers = {
-            "Authorization": f"Bearer {settings.supabase_service_role_key}",
-            "apikey": settings.supabase_service_role_key,
+        self.key = settings.supabase_service_role_key
+
+    def _headers(self, content_type: str) -> dict:
+        return {
+            "Authorization": f"Bearer {self.key}",
+            "apikey": self.key,
+            "Content-Type": content_type,
+            # Upsert allows overwriting same path safely
+            "x-upsert": "true",
         }
 
-    async def upload_file(self, local_path: Path, remote_path: str, content_type: str):
-        url = f"{self.base}/storage/v1/object/{self.bucket}/{remote_path}"
-        h = dict(self.headers)
-        h["Content-Type"] = content_type
-        async with httpx.AsyncClient(timeout=None) as client:
-            with local_path.open("rb") as f:
-                r = await client.put(url, headers=h, content=f)
-        r.raise_for_status()
-        return True
+    async def upload_file(self, local_path: Path, object_path: str, content_type: str) -> None:
+        """
+        Uploads a local file to Supabase Storage bucket at:
+        bucket/object_path
 
-    async def download_to_file(self, remote_path: str, local_path: Path):
-        url = f"{self.base}/storage/v1/object/{self.bucket}/{remote_path}"
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", url, headers=self.headers) as r:
-                r.raise_for_status()
-                with local_path.open("wb") as f:
-                    async for chunk in r.aiter_bytes(chunk_size=1024 * 1024):
-                        f.write(chunk)
-        return local_path
+        object_path example:
+          user_id/datasets/<dataset_id>/raw/file.csv
+        """
+        url = f"{self.base}/storage/v1/object/{self.bucket}/{object_path.lstrip('/')}"
+        data = local_path.read_bytes()
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, headers=self._headers(content_type), content=data)
+
+        # Supabase returns 200/201 on success; any 4xx/5xx should be surfaced
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Supabase upload failed: {resp.status_code} {resp.text}"
+            )
+
+    async def delete_object(self, object_path: str) -> None:
+        url = f"{self.base}/storage/v1/object/{self.bucket}/{object_path.lstrip('/')}"
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.delete(url, headers=self._headers("application/octet-stream"))
+
+        if resp.status_code not in (200, 204):
+            raise RuntimeError(f"Supabase delete failed: {resp.status_code} {resp.text}")
