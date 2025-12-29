@@ -10,6 +10,6 @@ router = APIRouter()
 async def stats_dataset(dataset_id: str, req: StatsRequest, user_id: str = Query(...)):
     try:
         result, cached = await run_stats(user_id, dataset_id, req.analysis, req.params)
-        return StatsResponse(analysis=req.analysis, result=result, cached=cached)
+        return StatsResponse(test=req.analysis, result=result, cached=cached)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
