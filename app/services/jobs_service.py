@@ -1,43 +1,33 @@
 from __future__ import annotations
 
-"""app/services/jobs_service.py
-
-This project has *two* historical "jobs" schemas in the wild.
-
-To stop POST /datasets from failing in Railway/Supabase, we standardize
-the code to the schema shipped in migrations/001_v2.sql:
-
-  jobs(
-    id uuid primary key,
-    user_id text not null,
-    dataset_id uuid not null,
-    type text not null,
-    status text not null,
-    progress int not null default 0,
-    message text,
-    result_json jsonb,
-    created_at timestamptz,
-    updated_at timestamptz
-  )
-
-If your Supabase table currently uses job_id/job_type columns,
-either run the provided SQL in README or rename columns to match.
-"""
-
 from typing import Any, Optional, Dict
+from uuid import UUID
 
 from app.db import registry
 
 
-async def create_job(user_id: str, dataset_id: str, job_type: str) -> str:
-    """Create a job row and return its id as a string."""
+def _require_uuid(value: str, field_name: str) -> str:
+    """Validate UUID strings early so you get clean 400s instead of 500s."""
+    try:
+        UUID(str(value))
+    except Exception as e:
+        raise ValueError(f"{field_name} must be a valid UUID (got '{value}')") from e
+    return str(value)
 
-    # NOTE: dataset_id is UUID in DB; asyncpg will validate.
+
+async def create_job(user_id: str, dataset_id: str, job_type: str) -> str:
+    """
+    Matches your Supabase schema:
+      jobs(job_id uuid PK, user_id uuid, dataset_id uuid, job_type text, ...)
+    """
+    _require_uuid(user_id, "user_id")
+    _require_uuid(dataset_id, "dataset_id")
+
     job_id = await registry.fetchval(
         """
-        INSERT INTO jobs (id, user_id, dataset_id, type, status, progress, message)
-        VALUES (gen_random_uuid(), $1, $2, $3, 'queued', 0, NULL)
-        RETURNING id
+        INSERT INTO jobs (user_id, dataset_id, job_type, status, progress, message)
+        VALUES ($1::uuid, $2::uuid, $3, 'queued', 0, NULL)
+        RETURNING job_id
         """,
         user_id,
         dataset_id,
@@ -53,6 +43,8 @@ async def update_job(
     message: str,
     result_json: Optional[Dict[str, Any]] = None,
 ) -> None:
+    _require_uuid(job_id, "job_id")
+
     await registry.execute(
         """
         UPDATE jobs
@@ -61,7 +53,7 @@ async def update_job(
             message=$4,
             result_json=$5,
             updated_at=NOW()
-        WHERE id=$1
+        WHERE job_id=$1::uuid
         """,
         job_id,
         status,
@@ -72,18 +64,21 @@ async def update_job(
 
 
 async def get_job(job_id: str, user_id: Optional[str] = None) -> Optional[dict]:
-    """Fetch a job by id.
+    _require_uuid(job_id, "job_id")
 
-    If user_id is provided, enforces per-user access.
-    """
     if user_id is None:
-        row = await registry.fetchrow("SELECT * FROM jobs WHERE id=$1", job_id)
-    else:
         row = await registry.fetchrow(
-            "SELECT * FROM jobs WHERE id=$1 AND user_id=$2",
+            "SELECT * FROM jobs WHERE job_id=$1::uuid",
+            job_id,
+        )
+    else:
+        _require_uuid(user_id, "user_id")
+        row = await registry.fetchrow(
+            "SELECT * FROM jobs WHERE job_id=$1::uuid AND user_id=$2::uuid",
             job_id,
             user_id,
         )
+
     return dict(row) if row else None
 
 
