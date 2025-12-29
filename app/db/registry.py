@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Optional
 
 import asyncpg
@@ -49,10 +48,18 @@ async def get_pool() -> asyncpg.Pool:
         min_size=1,
         max_size=5,
         ssl="require",   # Supabase / Railway typically require SSL
-        init=_init_conn, # ⭐ JSON / JSONB auto encode/decode
+        init=_init_conn, # JSON / JSONB auto encode/decode
     )
 
     return _pool
+
+
+async def close_pool() -> None:
+    """Gracefully close the global asyncpg pool (used on FastAPI shutdown)."""
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
 
 
 # ------------------------------------------------------------
