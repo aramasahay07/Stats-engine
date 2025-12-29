@@ -47,7 +47,20 @@ async def create_dataset(
         dataset_id, raw_ref, user_id
     )
 
-    job_id = await jobs_service.create_job(user_id, dataset_id, "build_parquet_profile")
+    print("DEBUG user_id:", user_id)
+    print("DEBUG dataset_id:", dataset_id, "len=", len(str(dataset_id)))
+    print("DEBUG project_id:", project_uuid)
+    try:
+    job_id = await jobs_service.create_job(
+        user_id,
+        dataset_id,
+        "build_parquet_profile"
+    )
+except Exception as e:
+    raise HTTPException(
+        status_code=400,
+        detail=f"create_job failed: {type(e).__name__}: {e}"
+    )
     background.add_task(dataset_service.build_parquet_and_profile, user_id, dataset_id, raw_local, raw_ref, job_id)
 
     profile = DatasetProfile(n_rows=0, n_cols=0, schema=[], sample_rows=[])
