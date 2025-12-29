@@ -1,8 +1,9 @@
 from __future__ import annotations
+import json
 from typing import Any, Optional, Dict
 from uuid import UUID
 from app.db import registry
-
+import json
 
 def _require_uuid(value: str, field_name: str) -> str:
     """Validate UUID strings early so you get clean 400s instead of 500s."""
@@ -33,15 +34,18 @@ async def create_job(user_id: str, dataset_id: str, job_type: str) -> str:
     )
     return str(job_id)
 
-
 async def update_job(
     job_id: str,
     status: str,
     progress: int,
     message: str,
-    result_json: dict | list | None = None,
+    result_json: Dict[str, Any] | list | None = None,
 ):
     """Update job status, progress, and message."""
+
+    # ✅ Serialize JSON for asyncpg JSONB column
+    payload = json.dumps(result_json) if result_json is not None else None
+
     return await registry.execute(
         """
         UPDATE jobs
@@ -56,7 +60,7 @@ async def update_job(
         status,
         int(progress),
         str(message),
-        result_json,  # can be dict/list or None
+        payload,   # ✅ string or None (NOT dict/list)
     )
 
 
