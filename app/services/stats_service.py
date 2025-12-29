@@ -78,15 +78,29 @@ async def _get_parquet_local(user_id: str, dataset_id: str) -> Path:
 # CACHING FUNCTIONS
 # ============================================================================
 
-async def try_cache_get(user_id: str, dataset_id: str, analysis_hash: str) -> Optional[Dict[str, Any]]:
+async def try_cache_get(
+    user_id: str,
+    dataset_id: str,
+    analysis_hash: str
+) -> Optional[Dict[str, Any]]:
     """
     Try to retrieve cached analysis results.
     Returns None if not found.
     """
     row = await registry.fetchrow(
-        "SELECT result_json FROM analysis_results WHERE dataset_id=$1 AND user_id=$2 AND analysis_hash=$3",
-        dataset_id, user_id, analysis_hash
+        """
+        SELECT result_json
+        FROM analysis_results
+        WHERE dataset_id = $1
+          AND user_id = $2
+          AND analysis_hash = $3
+        """,
+        dataset_id,
+        user_id,
+        analysis_hash,
     )
+
+    # asyncpg returns JSONB as dict already
     return dict(row["result_json"]) if row else None
 
 
@@ -95,13 +109,40 @@ async def cache_put(
     dataset_id: str,
     analysis_hash: str,
     spec_json: Dict[str, Any],
-    result_json: Dict[str, Any]
+    result_json: Dict[str, Any],
 ):
-    """Store analysis results in cache for future reuse."""
+    """
+    Store analysis results in cache for future reuse.
+    """
+
+    # ✅ Serialize Python dicts → JSON strings for asyncpg
+    spec_payload = json.dumps(spec_json)
+    result_payload = json.dumps(result_json)
+
     await registry.execute(
-        """INSERT INTO analysis_results (id, dataset_id, user_id, analysis_hash, spec_json, result_json)
-           VALUES (gen_random_uuid(), $1,$2,$3,$4,$5)""",
-        dataset_id, user_id, analysis_hash, spec_json, result_json
+        """
+        INSERT INTO analysis_results (
+            id,
+            dataset_id,
+            user_id,
+            analysis_hash,
+            spec_json,
+            result_json
+        )
+        VALUES (
+            gen_random_uuid(),
+            $1,
+            $2,
+            $3,
+            $4::jsonb,
+            $5::jsonb
+        )
+        """,
+        dataset_id,
+        user_id,
+        analysis_hash,
+        spec_payload,
+        result_payload,
     )
 
 

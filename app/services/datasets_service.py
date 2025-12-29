@@ -151,8 +151,8 @@ class DatasetService:
                 parquet_ref,
                 int(profile.get("n_rows") or 0),
                 int(profile.get("n_cols") or 0),
-                profile.get("schema") or [],
-                profile or {},
+                schema_payload,
+                profile_payload,
             )
 
             if not str(result).endswith("1"):
