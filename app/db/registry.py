@@ -1,11 +1,15 @@
 """
 app/db/registry.py
 
-Central DB registry for asyncpg pool + helper methods.
+Asyncpg pool + DB helper functions.
 
-Railway + Supabase fixes included:
-- Enforce SSL (Supabase commonly requires sslmode=require from external hosts)
-- Clear error messages when DATABASE_URL is missing or credentials are wrong
+Backwards compatible:
+- Supports calling: `from app.db import registry` then `await registry.execute(...)`
+- Also provides DBRegistry class + `registry_client` singleton if needed.
+
+Supabase/Railway hardened:
+- Enforces SSL
+- Clear errors when DATABASE_URL missing/bad
 """
 
 from __future__ import annotations
@@ -19,14 +23,6 @@ _pool: Optional[asyncpg.Pool] = None
 
 
 async def get_pool() -> asyncpg.Pool:
-    """
-    Create (once) and return the asyncpg pool.
-
-    Fixes repeated Railway 500s:
-    - Fails fast if DATABASE_URL is missing
-    - Enforces SSL for Supabase
-    - Raises clear RuntimeErrors instead of vague stack traces
-    """
     global _pool
 
     if _pool is not None:
@@ -46,58 +42,76 @@ async def get_pool() -> asyncpg.Pool:
             max_size=10,
             timeout=30,
             command_timeout=60,
-            # ✅ Critical for many Supabase external connections
-            ssl="require",
+            ssl="require",  # ✅ Supabase often requires SSL externally
         )
         return _pool
 
     except asyncpg.InvalidPasswordError as e:
         raise RuntimeError(
             "DB authentication failed (InvalidPasswordError). "
-            "Check DATABASE_URL user/password from Supabase."
+            "Check Supabase DATABASE_URL user/password."
         ) from e
 
     except Exception as e:
         raise RuntimeError(
             f"Failed to create database pool: {type(e).__name__}: {e}. "
-            "Check DATABASE_URL host/port and ensure it includes '?sslmode=require' (recommended)."
+            "Check Supabase host/port and use '?sslmode=require' (recommended)."
         ) from e
 
 
 async def close_pool() -> None:
-    """Close the pool gracefully (optional)."""
     global _pool
     if _pool is not None:
         await _pool.close()
         _pool = None
 
 
-class DBRegistry:
-    """
-    Lightweight wrapper providing common DB methods.
-    """
+# -------------------------------------------------------------------
+# Backwards-compatible module-level helpers
+# These fix: AttributeError: module 'app.db.registry' has no attribute 'execute'
+# -------------------------------------------------------------------
 
+async def execute(query: str, *args: Any) -> str:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.execute(query, *args)
+
+
+async def fetch(query: str, *args: Any) -> Sequence[asyncpg.Record]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch(query, *args)
+
+
+async def fetchrow(query: str, *args: Any) -> Optional[asyncpg.Record]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(query, *args)
+
+
+async def fetchval(query: str, *args: Any) -> Any:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(query, *args)
+
+
+# -------------------------------------------------------------------
+# Optional OO wrapper (safe to keep for future refactors)
+# -------------------------------------------------------------------
+
+class DBRegistry:
     async def execute(self, query: str, *args: Any) -> str:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            return await conn.execute(query, *args)
+        return await execute(query, *args)
 
     async def fetch(self, query: str, *args: Any) -> Sequence[asyncpg.Record]:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            return await conn.fetch(query, *args)
+        return await fetch(query, *args)
 
     async def fetchrow(self, query: str, *args: Any) -> Optional[asyncpg.Record]:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            return await conn.fetchrow(query, *args)
+        return await fetchrow(query, *args)
 
     async def fetchval(self, query: str, *args: Any) -> Any:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            return await conn.fetchval(query, *args)
+        return await fetchval(query, *args)
 
 
-# Singleton used across the app
-registry = DBRegistry()
-
+# If any code imports `registry_client`, it's available
+registry_client = DBRegistry()
