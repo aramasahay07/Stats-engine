@@ -44,12 +44,18 @@ class DatasetService:
         raw_ref = f"{paths['raw_dir']}/{file_name}"
         parquet_ref = paths["parquet"]
 
+        # NOTE: datasets.user_id is TEXT in your DB, so DO NOT cast $2 to uuid
         await registry.execute(
             """
             INSERT INTO datasets (dataset_id, user_id, project_id, file_name, raw_file_ref, parquet_ref)
-            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6)
             """,
-            dataset_id, user_id, project_id, file_name, raw_ref, parquet_ref
+            dataset_id,
+            user_id,
+            project_id,
+            file_name,
+            raw_ref,
+            parquet_ref,
         )
         return dataset_id
 

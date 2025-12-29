@@ -122,17 +122,16 @@ async def create_dataset(
 
 @router.get("/{dataset_id}", response_model=DatasetMetadataResponse)
 async def get_dataset(dataset_id: str, user_id: str):
-row = await registry.fetchrow(
-    """
-    SELECT *
-    FROM datasets
-    WHERE dataset_id=$1::uuid
-      AND user_id::text=$2
-    """,
-    dataset_id,
-    user_id,
-)
-
+    row = await registry.fetchrow(
+        """
+        SELECT *
+        FROM datasets
+        WHERE dataset_id = $1::uuid
+          AND user_id::text = $2
+        """,
+        dataset_id,
+        user_id,
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
