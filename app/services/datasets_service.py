@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
-from uuid import UUID
+from uuid import uuid4, UUID
 
 from fastapi import UploadFile
 
 from app.config import settings
 from app.services.storage_supabase import SupabaseStorage
 from app.services import jobs_service
-from app.engine.ingest import new_dataset_id, csv_to_parquet_streaming, xlsx_to_parquet, parquet_copy
+from app.engine.ingest import csv_to_parquet_streaming, xlsx_to_parquet, parquet_copy
 from app.engine.duckdb_engine import DuckDBEngine
 from app.engine.profiling import build_profile_from_duckdb
 from app.db import registry
@@ -20,9 +20,6 @@ class DatasetService:
         self.storage = SupabaseStorage()
 
     def _paths(self, user_id: str, dataset_id: str) -> Dict[str, str]:
-        # IMPORTANT: Match production storage mapping used by your frontend/Supabase tables:
-        #   {user_id}/datasets/{dataset_id}/raw/{filename}
-        #   {user_id}/datasets/{dataset_id}/parquet/data.parquet
         base = f"{user_id}/datasets/{dataset_id}"
         return {
             "raw_dir": f"{base}/raw",
@@ -36,9 +33,12 @@ class DatasetService:
 
     async def create_dataset_record(self, user_id: str, project_id: Optional[UUID], file_name: str) -> str:
         """
-        project_id must be a UUID or None (DB column is uuid).
+        IMPORTANT:
+        - dataset_id MUST be a UUID string because downstream jobs.dataset_id is UUID.
+        - project_id must be UUID or None (datasets.project_id is uuid).
         """
-        dataset_id = new_dataset_id()
+        dataset_id = str(uuid4())
+
         paths = self._paths(user_id, dataset_id)
         raw_ref = f"{paths['raw_dir']}/{file_name}"
         parquet_ref = paths["parquet"]
@@ -61,9 +61,7 @@ class DatasetService:
                     break
                 f.write(chunk)
 
-        # store in Supabase Storage
         paths = self._paths(user_id, dataset_id)
-        # Keep original filename for traceability and to match Supabase table refs
         raw_ref = f"{paths['raw_dir']}/{upload.filename}"
         await self.storage.upload_file(local_raw, raw_ref, upload.content_type or "application/octet-stream")
         return local_raw, raw_ref
@@ -103,7 +101,6 @@ class DatasetService:
         parquet_ref = paths["parquet"]
         await self.storage.upload_file(parquet_local, parquet_ref, "application/octet-stream")
 
-        # Profile using DuckDB (single truth)
         await jobs_service.update_job(job_id, "running", 70, "profiling")
 
         eng = DuckDBEngine(user_id)
@@ -118,13 +115,7 @@ class DatasetService:
             """UPDATE datasets
                SET parquet_ref=$2, n_rows=$3, n_cols=$4, schema_json=$5, profile_json=$6, updated_at=NOW()
                WHERE dataset_id=$1 AND user_id=$7""",
-            dataset_id,
-            parquet_ref,
-            profile["n_rows"],
-            profile["n_cols"],
-            profile["schema"],
-            profile,
-            user_id,
+            dataset_id, parquet_ref, profile["n_rows"], profile["n_cols"], profile["schema"], profile, user_id
         )
 
         await jobs_service.update_job(job_id, "done", 100, "complete", {"profile": profile})

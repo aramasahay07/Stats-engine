@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from uuid import UUID
+from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException
 
@@ -12,18 +13,12 @@ from app.db import registry
 router = APIRouter()
 
 
-def _normalize_optional_uuid(value: str | None) -> UUID | None:
-    """
-    - Treat Swagger default 'string' and other empty-ish values as None
-    - Validate UUID when provided
-    """
+def _normalize_optional_uuid(value: str | None) -> Optional[UUID]:
     if value is None:
         return None
-
     v = value.strip()
     if v in ("", "string", "null", "None"):
         return None
-
     try:
         return UUID(v)
     except Exception:
@@ -37,34 +32,24 @@ async def create_dataset(
     user_id: str = Form(...),
     project_id: str | None = Form(None),
 ):
-    # NOTE: The current production frontend sends user_id as a form field
-    # and does not attach an Authorization header.
-
-    # ✅ normalize/validate project_id (prevents invalid UUID 500)
     project_uuid = _normalize_optional_uuid(project_id)
 
-    # Create dataset_id now so we can build storage paths
+    # ✅ dataset_id will now always be a real UUID string
     dataset_id = await dataset_service.create_dataset_record(user_id, project_uuid, file.filename)
 
-    # Save raw file to disk + Supabase Storage
     try:
         raw_local, raw_ref = await dataset_service.save_raw_to_storage(user_id, dataset_id, file)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # raw_file_ref is pre-populated in the INSERT; keep a safety update in case filename differs
     await registry.execute(
         "UPDATE datasets SET raw_file_ref=$2, updated_at=NOW() WHERE dataset_id=$1 AND user_id=$3",
         dataset_id, raw_ref, user_id
     )
 
     job_id = await jobs_service.create_job(user_id, dataset_id, "build_parquet_profile")
-    background.add_task(
-        dataset_service.build_parquet_and_profile,
-        user_id, dataset_id, raw_local, raw_ref, job_id
-    )
+    background.add_task(dataset_service.build_parquet_and_profile, user_id, dataset_id, raw_local, raw_ref, job_id)
 
-    # return an initial lightweight profile (rows/cols unknown yet)
     profile = DatasetProfile(n_rows=0, n_cols=0, schema=[], sample_rows=[])
     return DatasetCreateResponse(dataset_id=dataset_id, profile=profile, job_id=job_id)
 
