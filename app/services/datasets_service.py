@@ -129,7 +129,7 @@ class DatasetService:
                 schema_json=$5,
                 profile_json=$6,
                 updated_at=NOW()
-            WHERE dataset_id=$1::uuid AND user_id::text=$7
+            WHERE dataset_id=$1::uuid 
             """,
             dataset_id,
             parquet_ref,
@@ -137,7 +137,6 @@ class DatasetService:
             profile.get("n_cols"),
             profile.get("schema"),
             profile,
-            user_id,
         )
 
         await jobs_service.update_job(job_id, "done", 100, "complete", {"profile": profile})
