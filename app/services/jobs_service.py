@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 from typing import Any, Optional, Dict
 from uuid import UUID
-
 from app.db import registry
 
 
@@ -22,7 +20,7 @@ async def create_job(user_id: str, dataset_id: str, job_type: str) -> str:
     """
     _require_uuid(user_id, "user_id")
     _require_uuid(dataset_id, "dataset_id")
-
+    
     job_id = await registry.fetchval(
         """
         INSERT INTO jobs (user_id, dataset_id, job_type, status, progress, message)
@@ -41,31 +39,34 @@ async def update_job(
     status: str,
     progress: int,
     message: str,
-    result_json: Optional[Dict[str, Any]] = None,
-) -> None:
-    _require_uuid(job_id, "job_id")
-
-    await registry.execute(
+    result_json: dict | list | None = None,
+):
+    """Update job status, progress, and message."""
+    return await registry.execute(
         """
         UPDATE jobs
-        SET status=$2,
-            progress=$3,
-            message=$4,
-            result_json=$5,
-            updated_at=NOW()
-        WHERE job_id=$1::uuid
+        SET status = $2,
+            progress = $3,
+            message = $4,
+            result_json = $5::jsonb,
+            updated_at = NOW()
+        WHERE job_id = $1::uuid
         """,
         job_id,
         status,
-        progress,
-        message,
-        result_json,
+        int(progress),
+        str(message),
+        result_json,  # can be dict/list or None
     )
 
 
 async def get_job(job_id: str, user_id: Optional[str] = None) -> Optional[dict]:
+    """
+    Get job by job_id, optionally filtered by user_id.
+    Returns job as dict or None if not found.
+    """
     _require_uuid(job_id, "job_id")
-
+    
     if user_id is None:
         row = await registry.fetchrow(
             "SELECT * FROM jobs WHERE job_id=$1::uuid",
@@ -78,11 +79,13 @@ async def get_job(job_id: str, user_id: Optional[str] = None) -> Optional[dict]:
             job_id,
             user_id,
         )
-
+    
     return dict(row) if row else None
 
 
 class JobsService:
+    """Service class for managing background jobs."""
+
     async def create_job(self, user_id: str, dataset_id: str, job_type: str) -> str:
         return await create_job(user_id, dataset_id, job_type)
 
@@ -92,7 +95,7 @@ class JobsService:
         status: str,
         progress: int,
         message: str,
-        result_json: Optional[Dict[str, Any]] = None,
+        result_json: dict | list | None = None,
     ) -> None:
         await update_job(job_id, status, progress, message, result_json)
 
@@ -100,4 +103,5 @@ class JobsService:
         return await get_job(job_id, user_id)
 
 
+# Singleton instance
 jobs_service = JobsService()
