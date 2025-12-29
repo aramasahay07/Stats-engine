@@ -5,15 +5,23 @@ from typing import Any, Optional, Dict
 from app.db import registry
 
 
-# ------------------------------------------------------------
-# Module-level functions (so routers can do:
-#   from app.services.jobs_service import get_job
-# ------------------------------------------------------------
-
 async def create_job(user_id: str, dataset_id: str, job_type: str) -> str:
     """
-    Insert a job row and return the generated job_id.
-    Assumes jobs table has primary key column: job_id uuid default gen_random_uuid()
+    Creates a job record and returns job_id (uuid as string).
+
+    Expected schema:
+      jobs(
+        job_id uuid primary key default gen_random_uuid(),
+        user_id text not null,
+        dataset_id uuid not null,
+        job_type text not null,
+        status text not null default 'queued',
+        progress int not null default 0,
+        message text,
+        result_json jsonb,
+        created_at timestamptz default now(),
+        updated_at timestamptz default now()
+      )
     """
     job_id = await registry.fetchval(
         """
@@ -21,9 +29,9 @@ async def create_job(user_id: str, dataset_id: str, job_type: str) -> str:
         VALUES ($1, $2, $3, 'queued', 0, NULL)
         RETURNING job_id
         """,
-        user_id,
-        dataset_id,
-        job_type,
+        user_id,        # $1 -> text
+        dataset_id,     # $2 -> uuid
+        job_type,       # $3 -> text
     )
     return str(job_id)
 
@@ -35,9 +43,6 @@ async def update_job(
     message: str,
     result_json: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """
-    Update an existing job by job_id.
-    """
     await registry.execute(
         """
         UPDATE jobs
@@ -56,21 +61,12 @@ async def update_job(
 
 
 async def get_job(job_id: str) -> Optional[dict]:
-    """
-    Fetch a job row by job_id.
-    """
     row = await registry.fetchrow(
         "SELECT * FROM jobs WHERE job_id=$1",
         job_id,
     )
     return dict(row) if row else None
 
-
-# ------------------------------------------------------------
-# Service object (so other code can do:
-#   from app.services import jobs_service
-#   await jobs_service.create_job(...)
-# ------------------------------------------------------------
 
 class JobsService:
     async def create_job(self, user_id: str, dataset_id: str, job_type: str) -> str:
