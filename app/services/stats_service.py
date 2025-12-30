@@ -34,16 +34,26 @@ from app.engine.duckdb_engine import DuckDBEngine
 # HELPER FUNCTIONS
 # ============================================================================
 
-import json
-import hashlib
-from pathlib import Path
-from typing import Dict, Any
+def _fingerprint_file(path: Path) -> str:
+    """
+    Compute SHA256 checksum of a local file.
+    Used to detect stale cached parquet files.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-from app.config import settings
-from app.db import registry
-
-
-def _hash_spec(dataset_id: str, analysis: str, params: Dict[str, Any]) -> str:
+def _hash_spec(
+    dataset_id: str,
+    analysis: str,
+    params: dict,
+    parquet_ref: str,
+    parquet_sha: str,
+    pipeline_hash: str,
+    engine_version: str,
+) -> str:
     """
     Create a unique hash for caching purposes.
     Same analysis on same data always produces same hash.
@@ -53,6 +63,10 @@ def _hash_spec(dataset_id: str, analysis: str, params: Dict[str, Any]) -> str:
             "dataset_id": dataset_id,
             "analysis": analysis,
             "params": params,
+            "parquet_ref": parquet_ref,
+            "parquet_sha": parquet_sha,
+            "pipeline_hash": pipeline_hash,
+            "engine_version": engine_version,
         },
         sort_keys=True,
     )
@@ -81,9 +95,29 @@ async def _get_parquet_local(user_id: str, dataset_id: str) -> Path:
         / "data.parquet"
     )
 
-    # ✅ Fast path: already cached locally
+    # ✅ Fast path: already cached locally— but verify integrity
     if p.exists():
-        return p
+        meta = await registry.fetchrow(
+            """
+            SELECT profile_json
+            FROM datasets
+            WHERE dataset_id = $1
+              AND user_id = $2
+            """,
+            dataset_id,
+            user_id,
+        )
+
+        expected_sha = None
+        if meta and meta["profile_json"]:
+            expected_sha = meta["profile_json"].get("parquet_sha")
+
+        # If checksum matches → safe to use
+        if expected_sha and _fingerprint_file(p) == expected_sha:
+            return p
+
+        # Otherwise stale parquet → delete and re-download
+        p.unlink()
 
     # 🔍 Fetch parquet reference from DB
     row = await registry.fetchrow(
@@ -203,24 +237,70 @@ async def descriptives(user_id: str, dataset_id: str, columns: List[str]) -> Dic
     view = eng.register_parquet(con, dataset_id, parquet)
     
     out: Dict[str, Any] = {}
-    for c in columns:
-        q = f"""SELECT
-            COUNT({_quote(c)}) AS count,
-            AVG({_quote(c)}) AS mean,
-            STDDEV_SAMP({_quote(c)}) AS std,
-            MIN({_quote(c)}) AS min,
-            MAX({_quote(c)}) AS max
+    meta = await registry.fetchrow(
+    """
+    SELECT profile_json
+    FROM datasets
+    WHERE dataset_id = $1
+      AND user_id = $2
+    """,
+    dataset_id,
+    user_id,
+)
+
+profile = meta["profile_json"] if meta else None
+numeric_summary = profile.get("numeric_summary") if profile else None
+for c in columns:
+        # ------------------------------------------------------------
+        # Reuse profile numeric summary if available (single source of truth)
+        # ------------------------------------------------------------
+
+
+        if numeric_summary and c in numeric_summary:
+            out[c] = numeric_summary[c]
+            continue
+        qc = _quote(c)
+
+        q = f"""
+            SELECT
+                COUNT(*) AS rows_total,
+                COUNT({qc}) AS rows_used,
+                COUNT(*) - COUNT({qc}) AS rows_missing,
+
+                AVG({qc}) AS mean,
+                STDDEV_SAMP({qc}) AS std,
+
+                MIN({qc}) AS min,
+                quantile_cont({qc}, 0.25) AS q1,
+                quantile_cont({qc}, 0.50) AS median,
+                quantile_cont({qc}, 0.75) AS q3,
+                MAX({qc}) AS max,
+
+                quantile_cont({qc}, 0.10) AS p10,
+                quantile_cont({qc}, 0.90) AS p90
             FROM {view}
+            
         """
         row = con.execute(q).fetchone()
+
         out[c] = {
-            "count": int(row[0]),
-            "mean": float(row[1]) if row[1] is not None else None,
-            "std": float(row[2]) if row[2] is not None else None,
-            "min": float(row[3]) if row[3] is not None else None,
-            "max": float(row[4]) if row[4] is not None else None
+            "rows_total": int(row[0]),
+            "rows_used": int(row[1]),
+            "rows_missing": int(row[2]),
+
+            "mean": float(row[3]) if row[3] is not None else None,
+            "std": float(row[4]) if row[4] is not None else None,
+
+            "min": float(row[5]) if row[5] is not None else None,
+            "q1": float(row[6]) if row[6] is not None else None,
+            "median": float(row[7]) if row[7] is not None else None,
+            "q3": float(row[8]) if row[8] is not None else None,
+            "max": float(row[9]) if row[9] is not None else None,
+
+            "p10": float(row[10]) if row[10] is not None else None,
+            "p90": float(row[11]) if row[11] is not None else None,
         }
-    
+
     con.close()
     return out
 
@@ -1029,13 +1109,49 @@ async def run_stats(
         "quartiles": "detailed_descriptives",
     }
     analysis = alias.get(analysis, analysis)
+    # ------------------------------------------------------------------
+    # Check cache first (lineage-safe)
+    # ------------------------------------------------------------------
+    meta = await registry.fetchrow(
+        """
+        SELECT profile_json
+        FROM datasets
+        WHERE dataset_id = $1
+          AND user_id = $2
+        """,
+        dataset_id,
+        user_id,
+    )
 
-    # Check cache first
-    h = _hash_spec(dataset_id, analysis, params)
+    if not meta or not meta["profile_json"]:
+        raise ValueError("Dataset profile not available; cannot compute stats safely")
+
+    profile = meta["profile_json"]
+    snapshot_payload = {
+        "dataset_id": dataset_id,
+        "parquet_sha": profile.get("parquet_sha"),
+        "pipeline_hash": profile.get("pipeline_hash", "__none__"),
+        "engine_version": profile.get("engine_version"),
+     }
+
+    snapshot_id = hashlib.sha256(
+               json.dumps(snapshot_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    h = _hash_spec(
+        dataset_id=dataset_id,
+        analysis=analysis,
+        params=params,
+        parquet_ref=profile.get("parquet_ref"),
+        parquet_sha=profile.get("parquet_sha"),
+        pipeline_hash=profile.get("pipeline_hash", "__none__"),
+        engine_version=profile.get("engine_version"),
+    )
+
     cached = await try_cache_get(user_id, dataset_id, h)
     if cached is not None:
+        cached["_snapshot_id"] = snapshot_id
         return cached, True
-    
+
     # Route to appropriate analysis function
     result = None
     
@@ -1159,8 +1275,17 @@ async def run_stats(
         raise ValueError(f"Unsupported analysis: {analysis}")
     
     # Cache the result
-    await cache_put(user_id, dataset_id, h, {"analysis": analysis, "params": params}, result)
-    
+    # Cache the result
+    result["_snapshot_id"] = snapshot_id
+
+    await cache_put(
+        user_id,
+        dataset_id,
+        h,
+        {"analysis": analysis, "params": params, "snapshot_id": snapshot_id},
+        result,
+    )
+
     return result, False
 
 
