@@ -248,17 +248,17 @@ async def descriptives(user_id: str, dataset_id: str, columns: List[str]) -> Dic
     user_id,
 )
 
-profile = meta["profile_json"] if meta else None
-numeric_summary = profile.get("numeric_summary") if profile else None
-for c in columns:
+    profile = meta["profile_json"] if meta else None
+    numeric_summary = profile.get("numeric_summary") if profile else None
+
+    for c in columns:
         # ------------------------------------------------------------
         # Reuse profile numeric summary if available (single source of truth)
         # ------------------------------------------------------------
-
-
         if numeric_summary and c in numeric_summary:
             out[c] = numeric_summary[c]
             continue
+
         qc = _quote(c)
 
         q = f"""
@@ -279,7 +279,6 @@ for c in columns:
                 quantile_cont({qc}, 0.10) AS p10,
                 quantile_cont({qc}, 0.90) AS p90
             FROM {view}
-            
         """
         row = con.execute(q).fetchone()
 
