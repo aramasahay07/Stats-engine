@@ -29,6 +29,24 @@ from app.config import settings
 from app.db import registry
 from app.engine.duckdb_engine import DuckDBEngine
 
+def ensure_dict(maybe_json):
+    """
+    Normalizes JSON fields that sometimes arrive as:
+    - None
+    - dict (already parsed)
+    - str (JSON text)
+    """
+    if maybe_json is None:
+        return {}
+    if isinstance(maybe_json, dict):
+        return maybe_json
+    if isinstance(maybe_json, str):
+        try:
+            v = json.loads(maybe_json)
+            return v if isinstance(v, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -108,10 +126,9 @@ async def _get_parquet_local(user_id: str, dataset_id: str) -> Path:
             user_id,
         )
 
-        expected_sha = None
-        if meta and meta["profile_json"]:
-            expected_sha = meta["profile_json"].get("parquet_sha")
-
+        profile = ensure_dict(meta["profile_json"]) if meta else {}
+        expected_sha = profile.get("parquet_sha")
+        
         # If checksum matches → safe to use
         if expected_sha and _fingerprint_file(p) == expected_sha:
             return p
@@ -247,9 +264,9 @@ async def descriptives(user_id: str, dataset_id: str, columns: List[str]) -> Dic
     dataset_id,
     user_id,
 )
-
-    profile = meta["profile_json"] if meta else None
-    numeric_summary = profile.get("numeric_summary") if profile else None
+    profile = ensure_dict(meta["profile_json"]) if meta else {}
+    numeric_summary = profile.get("numeric_summary")
+   
 
     for c in columns:
         # ------------------------------------------------------------
@@ -1121,17 +1138,17 @@ async def run_stats(
         dataset_id,
         user_id,
     )
-
-    if not meta or not meta["profile_json"]:
+    profile = ensure_dict(meta["profile_json"]) if meta else {}
+    if not profile:
         raise ValueError("Dataset profile not available; cannot compute stats safely")
 
-    profile = meta["profile_json"]
     snapshot_payload = {
         "dataset_id": dataset_id,
         "parquet_sha": profile.get("parquet_sha"),
         "pipeline_hash": profile.get("pipeline_hash", "__none__"),
         "engine_version": profile.get("engine_version"),
      }
+
 
     snapshot_id = hashlib.sha256(
                json.dumps(snapshot_payload, sort_keys=True).encode("utf-8")
