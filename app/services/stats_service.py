@@ -35,6 +35,8 @@ def ensure_dict(maybe_json):
     - None
     - dict (already parsed)
     - str (JSON text)
+    - something else (list/int/etc)
+    Returns a dict always.
     """
     if maybe_json is None:
         return {}
@@ -165,7 +167,6 @@ async def _get_parquet_local(user_id: str, dataset_id: str) -> Path:
 
     return p
 
-
 # ============================================================================
 # CACHING FUNCTIONS
 # ============================================================================
@@ -193,7 +194,26 @@ async def try_cache_get(
     )
 
     # asyncpg returns JSONB as dict already
-    return dict(row["result_json"]) if row else None
+    if not row:
+        return None
+
+    v = row["result_json"]
+
+    # Defensive: sometimes JSON may arrive stringified
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except Exception:
+            return None
+
+    # Ensure we return a dict or None
+    if isinstance(v, dict):
+        return v
+
+    try:
+        return dict(v)
+    except Exception:
+        return None
 
 
 async def cache_put(
@@ -1083,7 +1103,7 @@ async def run_stats(
     user_id: str,
     dataset_id: str,
     analysis: str,
-    params: Dict[str, Any]
+    params: Dict[str, Any]    
 ) -> Tuple[Dict[str, Any], bool]:
     """
     Main routing function for statistical analyses.
@@ -1102,6 +1122,9 @@ async def run_stats(
     - Time Series: moving_average, trend_analysis
     - Outliers: outlier_detection
     """
+    # ✅ PUT THIS HERE (after docstring, before any params usage)
+    params = ensure_dict(params)
+
     # --- Concept slug aliases ---
     # The preferred contract is to call this endpoint with a concept slug.
     # Internally we map slugs to concrete analysis implementations.
