@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import json
 from typing import Any, Dict, Optional
 
 from uuid import UUID
@@ -86,13 +86,26 @@ async def legacy_schema(session_id: str, user_id: str):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    profile = row.get("profile_json") or {}
-    missing_summary = profile.get("missing_summary") if isinstance(profile, dict) else None
+
+    profile = row.get("profile_json")
+
+    # ✅ normalize: None -> {}, str -> json.loads, non-dict -> {}
+    if isinstance(profile, str):
+        try:
+            profile = json.loads(profile)
+        except Exception:
+            profile = {}
+
+    if not isinstance(profile, dict):
+        profile = {}
+
+    missing_summary = profile.get("missing_summary")
+
     return {
         "schema": row["schema_json"],
         "n_rows": int(row["n_rows"] or 0),
         "n_cols": int(row["n_cols"] or 0),
-        "missing_summary": missing_summary
+        "missing_summary": missing_summary,
     }
 
 
