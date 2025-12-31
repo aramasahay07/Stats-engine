@@ -1,15 +1,24 @@
 from __future__ import annotations
+
 import json
 from typing import Any, Dict, Optional
-
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile, Query
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    Query,
+)
 
 from app.db import registry
 from app.models.datasets import DatasetCreateResponse, DatasetProfile
 from app.models.query import QueryResponse, QuerySpec
-from app.models.stats import StatsRequest, StatsResponse
+from app.models.stats import StatsRequest
 from app.services.datasets_service import dataset_service
 from app.services import jobs_service
 from app.services.query_service import run_query, run_query_operation
@@ -25,54 +34,112 @@ async def legacy_upload(
     user_id: str = Form(...),
     project_id: Optional[str] = Form(None),
 ):
-    """Legacy endpoint alias.
-
-    Production frontend still has a fallback path that calls /upload.
-    We treat this as a thin wrapper around POST /datasets.
     """
-    # project_id is optional and should be a UUID when provided.
+    Legacy endpoint alias.
+
+    Production frontend still calls /upload.
+    This is a thin wrapper around dataset creation.
+    """
+    # Normalize project_id → UUID | None
     project_uuid: Optional[UUID] = None
     if project_id and project_id.strip() not in ("", "string", "null", "None"):
         try:
             project_uuid = UUID(project_id.strip())
         except Exception:
-            raise HTTPException(status_code=400, detail="project_id must be a valid UUID or omitted")
+            raise HTTPException(
+                status_code=400,
+                detail="project_id must be a valid UUID or omitted",
+            )
 
-    dataset_id = await dataset_service.create_dataset_record(user_id, project_uuid, file.filename)
     try:
-        raw_local, raw_ref = await dataset_service.save_raw_to_storage(user_id, dataset_id, file)
+        # 1️⃣ Create dataset record
+        dataset_id = await dataset_service.create_dataset_record(
+            user_id, project_uuid, file.filename
+        )
+
+        # 2️⃣ Save raw file
+        raw_local, raw_ref = await dataset_service.save_raw_to_storage(
+            user_id, dataset_id, file
+        )
+
+        # 3️⃣ Persist raw file reference
+        await registry.execute(
+            """
+            UPDATE datasets
+            SET raw_file_ref = $2,
+                updated_at = NOW()
+            WHERE dataset_id = $1
+              AND user_id = $3
+            """,
+            dataset_id,
+            raw_ref,
+            user_id,
+        )
+
+        # 4️⃣ Create background job
+        job_id = await jobs_service.create_job(
+            user_id, dataset_id, "build_parquet_profile"
+        )
+
+        background.add_task(
+            dataset_service.build_parquet_and_profile,
+            user_id,
+            dataset_id,
+            raw_local,
+            raw_ref,
+            job_id,
+        )
+
+        # 5️⃣ Return minimal placeholder profile
+        profile = DatasetProfile(
+            n_rows=0,
+            n_cols=0,
+            schema=[],
+            sample_rows=[],
+        )
+
+        return DatasetCreateResponse(
+            dataset_id=dataset_id,
+            profile=profile,
+            job_id=job_id,
+        )
+
+    except HTTPException:
+        # 🔴 Preserve 409 / 422 / 403 from service layer
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    await registry.execute(
-        "UPDATE datasets SET raw_file_ref=$2, updated_at=NOW() WHERE dataset_id=$1 AND user_id=$3",
-        dataset_id, raw_ref, user_id
-    )
-
-    job_id = await jobs_service.create_job(user_id, dataset_id, "build_parquet_profile")
-    background.add_task(dataset_service.build_parquet_and_profile, user_id, dataset_id, raw_local, raw_ref, job_id)
-
-    profile = DatasetProfile(n_rows=0, n_cols=0, schema=[], sample_rows=[])
-    return DatasetCreateResponse(dataset_id=dataset_id, profile=profile, job_id=job_id)
-
 
 @router.post("/query/{session_id}", response_model=QueryResponse)
-async def legacy_query(session_id: str, payload: Dict[str, Any] = Body(...), user_id: str = Query(...)):
-    """Legacy session query endpoint (alias).
+async def legacy_query(
+    session_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Query(...),
+):
+    """
+    Legacy session query endpoint.
 
-    IMPORTANT: session_id is treated as dataset_id (same UUID in production).
-    Supports two payload styles:
-    1) Backend QuerySpec shape (select/measures/filters/groupby/order_by/limit)
-    2) Edge tool-call operation shape (operation + group_by/metrics/filters/limit)
+    NOTE:
+    - session_id == dataset_id
+    - Supports:
+        1) QuerySpec payload
+        2) Operation-based payload (Edge compatibility)
     """
     dataset_id = session_id
+
     try:
         if "operation" in payload:
             res = await run_query_operation(user_id, dataset_id, payload)
         else:
             spec = QuerySpec(**payload)
             res = await run_query(user_id, dataset_id, spec)
+
         return QueryResponse(**res)
+
+    except HTTPException:
+        # 🔴 Do NOT downgrade real HTTP errors
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -80,16 +147,24 @@ async def legacy_query(session_id: str, payload: Dict[str, Any] = Body(...), use
 @router.get("/schema/{session_id}")
 async def legacy_schema(session_id: str, user_id: str = Query(...)):
     dataset_id = session_id
+
     row = await registry.fetchrow(
-        "SELECT schema_json, n_rows, n_cols, profile_json FROM datasets WHERE dataset_id=$1 AND user_id=$2",
-        dataset_id, user_id
+        """
+        SELECT schema_json, n_rows, n_cols, profile_json
+        FROM datasets
+        WHERE dataset_id = $1
+          AND user_id = $2
+        """,
+        dataset_id,
+        user_id,
     )
+
     if not row:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    profile = row.get("profile_json")
+    profile = row["profile_json"]
 
-    # ✅ normalize: None -> {}, str -> json.loads, non-dict -> {}
+    # Normalize profile_json safely
     if isinstance(profile, str):
         try:
             profile = json.loads(profile)
@@ -99,20 +174,31 @@ async def legacy_schema(session_id: str, user_id: str = Query(...)):
     if not isinstance(profile, dict):
         profile = {}
 
-    missing_summary = profile.get("missing_summary")
-
     return {
         "schema": row["schema_json"],
         "n_rows": int(row["n_rows"] or 0),
         "n_cols": int(row["n_cols"] or 0),
-        "missing_summary": missing_summary,
+        "missing_summary": profile.get("missing_summary"),
     }
 
 
 @router.get("/sample/{session_id}")
-async def legacy_sample(session_id: str, user_id: str = Query(...), max_rows: int = 50):
+async def legacy_sample(
+    session_id: str,
+    user_id: str = Query(...),
+    max_rows: int = 50,
+):
     dataset_id = session_id
-    spec = QuerySpec(select=[], measures=[], groupby=[], filters=[], order_by=[], limit=max_rows)
+
+    spec = QuerySpec(
+        select=[],
+        measures=[],
+        groupby=[],
+        filters=[],
+        order_by=[],
+        limit=max_rows,
+    )
+
     res = await run_query(user_id, dataset_id, spec)
     return {"sample_rows": res.get("data", [])}
 
@@ -120,12 +206,30 @@ async def legacy_sample(session_id: str, user_id: str = Query(...), max_rows: in
 @router.get("/analysis/{session_id}")
 async def legacy_analysis(session_id: str, user_id: str = Query(...)):
     dataset_id = session_id
-    # Bundle-style analysis for compatibility
-    req = StatsRequest(analysis="descriptives", params={"columns": []})
-    result, cached = await run_stats(user_id, dataset_id, req.analysis, req.params)
-    return {"analysis": req.analysis, "result": result, "cached": cached}
+
+    req = StatsRequest(
+        analysis="descriptives",
+        params={"columns": []},
+    )
+
+    result, cached = await run_stats(
+        user_id,
+        dataset_id,
+        req.analysis,
+        req.params,
+    )
+
+    return {
+        "analysis": req.analysis,
+        "result": result,
+        "cached": cached,
+    }
 
 
 @router.post("/session/rehydrate")
 async def legacy_rehydrate_from_url():
-    raise HTTPException(status_code=410, detail="Session rehydrate is deprecated. Use POST /datasets.")
+    raise HTTPException(
+        status_code=410,
+        detail="Session rehydrate is deprecated. Use POST /datasets.",
+    )
+
