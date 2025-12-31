@@ -79,9 +79,11 @@ class DatasetService:
                 project_id,
                 file_name,
                 raw_file_ref,
-                parquet_ref
+                parquet_ref,
+                state,
+                version
             )
-            VALUES ($1::uuid, $2, $3, $4, $5, $6)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
             """,
             dataset_id,
             user_id,
@@ -89,6 +91,8 @@ class DatasetService:
             file_name,
             raw_ref,
             parquet_ref,
+            "processing",
+            1,
         )
 
         return dataset_id
@@ -200,6 +204,8 @@ class DatasetService:
                     n_cols = $4,
                     schema_json = $5::jsonb,
                     profile_json = $6::jsonb,
+                    state = 'ready',
+                    error_message = NULL,
                     updated_at = NOW()
                 WHERE dataset_id = $1::uuid
                 """,
@@ -223,18 +229,25 @@ class DatasetService:
             )
 
             return profile
-
         except Exception as e:
+    # Mark dataset as failed (best-effort; don't mask original error)
             try:
-                await jobs_service.update_job(
-                    job_id,
-                    "failed",
-                    100,
+                await registry.execute(
+                    """
+                    UPDATE datasets
+                    SET state = 'failed',
+                        error_message = $2,
+                        updated_at = NOW()
+                    WHERE dataset_id = $1::uuid
+                    """,
+                    dataset_id,
                     f"{type(e).__name__}: {e}",
                 )
             except Exception:
                 pass
+
             raise
+ 
 
 
 # Singleton

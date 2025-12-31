@@ -120,7 +120,7 @@ async def _ensure_parquet_local(user_id: str, dataset_id: str) -> Path:
         return p
 
     row = await registry.fetchrow(
-        "SELECT parquet_ref FROM datasets WHERE dataset_id=$1 AND user_id=$2",
+        "SELECT parquet_ref FROM datasets WHERE dataset_id = $1::uuid AND user_id=$2",
         dataset_id, user_id,
     )
     if not row or not row.get("parquet_ref"):
@@ -297,8 +297,10 @@ async def run_query_operation(user_id: str, dataset_id: str, payload: Dict[str, 
             col = m.get("column")
             func = str(m.get("func") or "").lower()
             alias = m.get("alias") or f"{func}_{col}"
-            # Use conservative allowlist, map to SQL
+            
+            # Use conservative allowlist, map to DuckDB SQL
             func_map = {
+                # Existing
                 "count": "COUNT",
                 "sum": "SUM",
                 "mean": "AVG",
@@ -306,15 +308,39 @@ async def run_query_operation(user_id: str, dataset_id: str, payload: Dict[str, 
                 "min": "MIN",
                 "max": "MAX",
                 "std": "STDDEV_SAMP",
-                "nunique": "COUNT(DISTINCT ",
+                "nunique": "__NUNIQUE__",
+
+                # ADD THESE (DuckDB-native)
+                "median": "MEDIAN",
+                "mode": "MODE",
+                "variance": "VAR_SAMP",   # DuckDB supports VAR_SAMP / VAR_POP
+                "var": "VAR_SAMP",
+                "var_samp": "VAR_SAMP",
+                "var_pop": "VAR_POP",
             }
-            if func not in func_map:
-                raise ValueError(f"Unsupported agg func: {func}")
-            if func == "nunique":
-                expr = f"COUNT(DISTINCT {_quote_ident(col)})"
+
+            # Percentiles: accept keys like percentile_25, percentile_75, percentile_90
+            if func.startswith("percentile_"):
+                try:
+                    p = int(func.split("_", 1)[1])
+                except Exception:
+                    raise ValueError(f"Unsupported percentile format: {func}")
+                if p < 0 or p > 100:
+                    raise ValueError(f"Percentile out of range (0-100): {p}")
+                q = p / 100.0
+                expr = f"QUANTILE_CONT({_quote_ident(col)}, {q})"
+
+            elif func in func_map:
+                if func == "nunique":
+                    expr = f"COUNT(DISTINCT {_quote_ident(col)})"
+                else:
+                    expr = f"{func_map[func]}({_quote_ident(col)})"
+
             else:
-                expr = f"{func_map[func]}({_quote_ident(col)})"
+                raise ValueError(f"Unsupported agg func: {func}")
+
             measures.append({"name": alias, "expr": expr})
+
 
         # Build QuerySpec using the pydantic model types (pydantic will coerce dicts -> Measure)
         spec = QuerySpec(
@@ -369,7 +395,7 @@ async def run_query_operation(user_id: str, dataset_id: str, payload: Dict[str, 
         if not cols:
             # If no columns specified, pick numeric columns from schema_json if available
             row = await registry.fetchrow(
-                "SELECT schema_json FROM datasets WHERE dataset_id=$1 AND user_id=$2",
+                "SELECT schema_json FROM datasets WHERE dataset_id = $1::uuid AND user_id=$2",
                 dataset_id, user_id,
             )
             schema = row["schema_json"] if row and row.get("schema_json") else []

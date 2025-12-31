@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, UploadFile, Query
 
 from app.db import registry
 from app.models.datasets import DatasetCreateResponse, DatasetProfile
@@ -22,7 +22,7 @@ router = APIRouter(tags=["legacy"], include_in_schema=True)
 async def legacy_upload(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    user_id: str = Form("anonymous"),
+    user_id: str = Form(...),
     project_id: Optional[str] = Form(None),
 ):
     """Legacy endpoint alias.
@@ -57,7 +57,7 @@ async def legacy_upload(
 
 
 @router.post("/query/{session_id}", response_model=QueryResponse)
-async def legacy_query(session_id: str, payload: Dict[str, Any] = Body(...), user_id: str = "anonymous"):
+async def legacy_query(session_id: str, payload: Dict[str, Any] = Body(...), user_id: str = Query(...)):
     """Legacy session query endpoint (alias).
 
     IMPORTANT: session_id is treated as dataset_id (same UUID in production).
@@ -78,7 +78,7 @@ async def legacy_query(session_id: str, payload: Dict[str, Any] = Body(...), use
 
 
 @router.get("/schema/{session_id}")
-async def legacy_schema(session_id: str, user_id: str):
+async def legacy_schema(session_id: str, user_id: str = Query(...)):
     dataset_id = session_id
     row = await registry.fetchrow(
         "SELECT schema_json, n_rows, n_cols, profile_json FROM datasets WHERE dataset_id=$1 AND user_id=$2",
@@ -110,7 +110,7 @@ async def legacy_schema(session_id: str, user_id: str):
 
 
 @router.get("/sample/{session_id}")
-async def legacy_sample(session_id: str, user_id: str, max_rows: int = 50):
+async def legacy_sample(session_id: str, user_id: str = Query(...), max_rows: int = 50):
     dataset_id = session_id
     spec = QuerySpec(select=[], measures=[], groupby=[], filters=[], order_by=[], limit=max_rows)
     res = await run_query(user_id, dataset_id, spec)
@@ -118,7 +118,7 @@ async def legacy_sample(session_id: str, user_id: str, max_rows: int = 50):
 
 
 @router.get("/analysis/{session_id}")
-async def legacy_analysis(session_id: str, user_id: str):
+async def legacy_analysis(session_id: str, user_id: str = Query(...)):
     dataset_id = session_id
     # Bundle-style analysis for compatibility
     req = StatsRequest(analysis="descriptives", params={"columns": []})
