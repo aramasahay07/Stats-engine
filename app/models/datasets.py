@@ -29,3 +29,7 @@ class DatasetMetadataResponse(BaseModel):
     profile_json: Any
     raw_file_ref: str
     parquet_ref: Optional[str] = None
+    user_id: str
+    project_id: Optional[str] = None
+    state: str = "ready"
+    version: int = 1
