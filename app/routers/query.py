@@ -3,9 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from app.db import registry
+from app.engine.duckdb_engine import DuckDBUnsupportedTypeError
 from app.models.query import ExportResponse, QueryResponse, QuerySpec
 from app.services.query_service import export_query, run_query
-from app.engine.duckdb_engine import DuckDBUnsupportedTypeError
 
 router = APIRouter()
 
@@ -29,7 +29,9 @@ async def validate_dataset_ready(dataset_id: str, user_id: str) -> dict:
     if not row_any:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    if row_any["user_id"] != user_id:
+    # registry.fetchrow may return asyncpg.Record (dict-like) or dict depending on your wrapper
+    row_user_id = row_any.get("user_id") if hasattr(row_any, "get") else row_any["user_id"]
+    if row_user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
     state = (row_any.get("state") if hasattr(row_any, "get") else row_any["state"]) or "ready"
@@ -54,6 +56,7 @@ async def validate_dataset_ready(dataset_id: str, user_id: str) -> dict:
             detail={"code": "DATASET_PROCESSING", "message": "Dataset parquet is not ready yet."},
         )
 
+    # Convert to plain dict for downstream use/logging if needed
     return dict(row_any)
 
 
@@ -63,19 +66,28 @@ async def query_dataset(dataset_id: str, spec: QuerySpec, user_id: str = Query(.
         await validate_dataset_ready(dataset_id, user_id)
         res = await run_query(user_id, dataset_id, spec)
         return QueryResponse(**res)
+
     except HTTPException:
         raise
-        except DuckDBUnsupportedTypeError as e:
+
+    except DuckDBUnsupportedTypeError as e:
         raise HTTPException(
             status_code=422,
             detail={"code": "UNSUPPORTED_TYPE", "message": str(e)},
         )
+
     except Exception as e:
+        # Keep 400 for user/query errors; if you want true server errors to be 500, change this to 500.
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/{dataset_id}/query/export", response_model=ExportResponse)
-async def export_dataset_query(dataset_id: str, spec: QuerySpec, user_id: str = Query(...), fmt: str = "parquet"):
+async def export_dataset_query(
+    dataset_id: str,
+    spec: QuerySpec,
+    user_id: str = Query(...),
+    fmt: str = "parquet",
+):
     """Export query results to Supabase Storage.
 
     Use for large result sets (e.g., up to 1M rows) instead of returning huge JSON.
@@ -84,12 +96,15 @@ async def export_dataset_query(dataset_id: str, spec: QuerySpec, user_id: str = 
         await validate_dataset_ready(dataset_id, user_id)
         res = await export_query(user_id, dataset_id, spec, fmt=fmt)
         return ExportResponse(**res)
+
     except HTTPException:
         raise
-        except DuckDBUnsupportedTypeError as e:
+
+    except DuckDBUnsupportedTypeError as e:
         raise HTTPException(
             status_code=422,
             detail={"code": "UNSUPPORTED_TYPE", "message": str(e)},
         )
+
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
