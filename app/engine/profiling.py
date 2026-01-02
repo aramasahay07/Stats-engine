@@ -12,7 +12,7 @@ used by stats_service.py and snapshot enforcement.
 """
 
 from __future__ import annotations
-
+import json
 from typing import Any, Dict, List
 
 
@@ -150,7 +150,9 @@ def build_profile_from_duckdb(
     rows_df = con.execute(
         f"SELECT * FROM {view} LIMIT {sample_limit}"
     ).fetchdf()
-    sample_rows = rows_df.to_dict(orient="records")
+    # ✅ JSON-safe sample rows (timestamps -> ISO strings)
+    sample_rows = json.loads(rows_df.to_json(orient="records", date_format="iso"))
+    
 
     # =========================================================================
     # STEP 7: Return authoritative profile
