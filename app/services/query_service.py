@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any
+import json
 
 from app.engine.duckdb_engine import DuckDBEngine
 from app.models.query import QuerySpec
@@ -227,7 +228,7 @@ async def run_query(user_id: str, dataset_id: str, spec: QuerySpec) -> Dict[str,
 
     return {
         "columns": list(df.columns),
-        "data": df.to_dict(orient="records"),
+        "data": json.loads(df.to_json(orient="records", date_format="iso")),
         "row_count": len(df),
     }
 
