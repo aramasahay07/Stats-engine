@@ -46,10 +46,47 @@ def csv_to_parquet_streaming(csv_path: Path, parquet_path: Path) -> tuple[int, i
 
 def xlsx_to_parquet(xlsx_path: Path, parquet_path: Path, sheet_name: str | int | None = 0) -> tuple[int, int]:
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
+
     df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
+
+    # ------------------------------------------------------------
+    # Normalize risky Excel-derived types BEFORE writing Parquet
+    # (prevents DuckDB issues with TIME/TZ-like parquet types)
+    # ------------------------------------------------------------
+    for col in df.columns:
+        s = df[col]
+
+        # tz-aware datetime columns -> string
+        if pd.api.types.is_datetime64tz_dtype(s):
+            df[col] = s.astype(str)
+            continue
+
+        # object columns can contain datetime.time, tz-aware datetime, mixed objects
+        if s.dtype == "object":
+            sample = s.dropna().head(20)
+            if sample.empty:
+                continue
+
+            needs_cast = False
+            for v in sample:
+                # Excel time cells often become datetime.time objects
+                # (time has hour/minute/second but no "date" attribute)
+                if hasattr(v, "hour") and hasattr(v, "minute") and not hasattr(v, "date"):
+                    needs_cast = True
+                    break
+
+                # tz-aware datetime objects
+                if hasattr(v, "tzinfo") and v.tzinfo is not None:
+                    needs_cast = True
+                    break
+
+            if needs_cast:
+                df[col] = s.astype(str)
+
     table = pa.Table.from_pandas(df, preserve_index=False)
     pq.write_table(table, parquet_path.as_posix(), compression="zstd")
     return int(table.num_rows), int(table.num_columns)
+
 
 def parquet_copy(parquet_in: Path, parquet_out: Path) -> tuple[int, int]:
     parquet_out.parent.mkdir(parents=True, exist_ok=True)

@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.db import registry
 from app.models.query import ExportResponse, QueryResponse, QuerySpec
 from app.services.query_service import export_query, run_query
+from app.engine.duckdb_engine import DuckDBUnsupportedTypeError
 
 router = APIRouter()
 
@@ -64,6 +65,11 @@ async def query_dataset(dataset_id: str, spec: QuerySpec, user_id: str = Query(.
         return QueryResponse(**res)
     except HTTPException:
         raise
+        except DuckDBUnsupportedTypeError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "UNSUPPORTED_TYPE", "message": str(e)},
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -80,5 +86,10 @@ async def export_dataset_query(dataset_id: str, spec: QuerySpec, user_id: str = 
         return ExportResponse(**res)
     except HTTPException:
         raise
+        except DuckDBUnsupportedTypeError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "UNSUPPORTED_TYPE", "message": str(e)},
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
