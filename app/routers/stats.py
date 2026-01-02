@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.db import registry
 from app.models.stats import StatsRequest, StatsResponse
 from app.services.stats_service import run_stats
+from app.engine.duckdb_engine import DuckDBUnsupportedTypeError
 
 router = APIRouter()
 async def validate_dataset_ready(dataset_id: str, user_id: str) -> dict:
@@ -86,6 +87,11 @@ async def stats_dataset(
             result=result,
             cached=cached,
         )
-
+        except DuckDBUnsupportedTypeError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "UNSUPPORTED_TYPE", "message": str(e)},
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
