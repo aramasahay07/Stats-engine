@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
+import numpy as np
+from scipy import stats
 
 META = ConceptMeta(
     id='cfbc5ff5-a1ce-4ed4-a966-47c15bcbd3fc',
@@ -19,15 +20,44 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Outliers (outliers).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
-    """
-    raise NotImplementedError('Concept implementation not yet added for slug: outliers')
-
+    """Detect outliers using IQR or Z-score method."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    method = params.get('method', 'iqr')
+    query = f"SELECT rowid, {column} FROM dataset WHERE {column} IS NOT NULL"
+    result = ctx.con.execute(query).fetchall()
+    
+    if len(result) < 4:
+        return {'error': 'Need at least 4 values'}
+    
+    row_ids = [r[0] for r in result]
+    data = np.array([r[1] for r in result])
+    
+    if method == 'iqr':
+        q1, q3 = np.percentile(data, [25, 75])
+        iqr = q3 - q1
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        outlier_mask = (data < lower) | (data > upper)
+        
+        return {
+            'outlier_count': int(np.sum(outlier_mask)),
+            'outlier_indices': [row_ids[i] for i, x in enumerate(outlier_mask) if x],
+            'outlier_values': data[outlier_mask].tolist(),
+            'lower_bound': float(lower),
+            'upper_bound': float(upper),
+            'method': 'iqr',
+            'measure': column
+        }
+    else:
+        z_scores = np.abs(stats.zscore(data, ddof=1))
+        outlier_mask = z_scores > 3
+        
+        return {
+            'outlier_count': int(np.sum(outlier_mask)),
+            'outlier_indices': [row_ids[i] for i, x in enumerate(outlier_mask) if x],
+            'outlier_values': data[outlier_mask].tolist(),
+            'method': 'zscore',
+            'measure': column
+        }

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
 
 META = ConceptMeta(
     id='4bbf3927-946c-49ef-a71c-9b05fe42348a',
@@ -19,15 +18,21 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Percentiles (percentiles).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
-    """
-    raise NotImplementedError('Concept implementation not yet added for slug: percentiles')
-
+    """Calculate percentiles of a numeric column."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    percentiles_list = params.get('percentiles', [10, 25, 50, 75, 90, 95, 99])
+    percentiles = {}
+    
+    for p in percentiles_list:
+        query = f"SELECT QUANTILE({column}, {p/100.0}) FROM dataset WHERE {column} IS NOT NULL"
+        result = ctx.con.execute(query).fetchone()
+        percentiles[f'p{p}'] = float(result[0]) if result[0] is not None else None
+    
+    return {
+        'percentiles': percentiles,
+        'percentile_values': percentiles_list,
+        'measure': column
+    }

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
+from scipy import stats
+import numpy as np
 
 META = ConceptMeta(
     id='0b5f0aef-b1d3-49be-8ad9-74f48468160a',
@@ -19,15 +20,26 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Z-score (z-score).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
-    """
-    raise NotImplementedError('Concept implementation not yet added for slug: z-score')
-
+    """Calculate z-scores for a column."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL ORDER BY rowid"
+    data = ctx.con.execute(query).fetchnumpy()[column]
+    
+    if len(data) < 2:
+        return {'error': 'Need at least 2 values'}
+    
+    z_scores = stats.zscore(data, ddof=1)
+    outliers = np.where(np.abs(z_scores) > 3)[0]
+    
+    return {
+        'z_scores': z_scores.tolist(),
+        'mean': float(np.mean(data)),
+        'std': float(np.std(data, ddof=1)),
+        'outlier_count': len(outliers),
+        'outlier_indices': outliers.tolist(),
+        'valid_count': len(data),
+        'measure': column
+    }

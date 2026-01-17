@@ -2,32 +2,42 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
 
 META = ConceptMeta(
     id='ef0a896d-3a00-4b3e-b300-03b70b8abe62',
     topic_id='e5b8a289-d663-4317-a4cf-1e90ca3f6e64',
     topic_slug='descriptive-statistics',
     slug='coefficient-of-variation',
-    title='Coefficient of Variation (CV)',
-    concept_type='metric',
-    level='intermediate',
-    status='published',
-    output_keys=['cv', 'coef_var'],
-    tags=['spread'],
-    quality_score=80,
-)
+    title='Coefficient of Variation (CV)
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Coefficient of Variation (CV) (coefficient-of-variation).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
+    """Calculate the coefficient of variation (CV = std/mean * 100)."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    query = f"""
+        SELECT 
+            STDDEV_SAMP({column}) as std,
+            AVG({column}) as mean,
+            COUNT({column}) as valid_count
+        FROM dataset
+        WHERE {column} IS NOT NULL
     """
-    raise NotImplementedError('Concept implementation not yet added for slug: coefficient-of-variation')
-
+    
+    result = ctx.con.execute(query).fetchone()
+    std, mean, count = result
+    
+    if mean == 0 or mean is None:
+        return {'cv': None, 'error': 'Mean is zero or null', 'std': std, 'mean': mean}
+    
+    cv = (std / abs(mean)) * 100
+    
+    return {
+        'cv': float(cv),
+        'coefficient_of_variation': float(cv),
+        'std': float(std),
+        'mean': float(mean),
+        'valid_count': int(count),
+        'measure': column
+    }
