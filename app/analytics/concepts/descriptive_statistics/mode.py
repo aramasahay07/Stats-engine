@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
 
 META = ConceptMeta(
     id='2f31ed69-bbbd-42d8-b10e-ba087b04f592',
@@ -19,15 +18,32 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Mode (mode).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
+    """Calculate the mode (most frequent value) of a column."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    query = f"""
+        WITH freq AS (
+            SELECT {column} as val, COUNT(*) as freq
+            FROM dataset
+            WHERE {column} IS NOT NULL
+            GROUP BY {column}
+            ORDER BY freq DESC
+            LIMIT 1
+        )
+        SELECT val as mode, freq, 
+               (SELECT COUNT(*) FROM dataset WHERE {column} IS NOT NULL) as total
+        FROM freq
     """
-    raise NotImplementedError('Concept implementation not yet added for slug: mode')
-
+    
+    result = ctx.con.execute(query).fetchone()
+    
+    if result:
+        return {
+            'mode': result[0],
+            'frequency': int(result[1]),
+            'total_count': int(result[2]),
+            'measure': column
+        }
+    return {'mode': None, 'frequency': 0, 'measure': column}

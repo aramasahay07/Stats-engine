@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
+from scipy import stats
 
 META = ConceptMeta(
     id='e59f9621-91c2-45be-9fa0-573f981ec9dc',
@@ -19,15 +19,30 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Kurtosis (kurtosis).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
-    """
-    raise NotImplementedError('Concept implementation not yet added for slug: kurtosis')
-
+    """Calculate the kurtosis of a distribution."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL"
+    data = ctx.con.execute(query).fetchnumpy()[column]
+    
+    if len(data) < 4:
+        return {'kurtosis': None, 'error': 'Need at least 4 values'}
+    
+    kurt = float(stats.kurtosis(data, bias=False, fisher=True))
+    
+    if abs(kurt) < 0.5:
+        interpretation = 'mesokurtic (normal-like tails)'
+    elif kurt > 0.5:
+        interpretation = 'leptokurtic (heavy tails)'
+    else:
+        interpretation = 'platykurtic (light tails)'
+    
+    return {
+        'kurtosis': kurt,
+        'excess_kurtosis': kurt,
+        'interpretation': interpretation,
+        'valid_count': len(data),
+        'measure': column
+    }

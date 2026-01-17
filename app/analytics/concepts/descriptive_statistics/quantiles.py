@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
 
 META = ConceptMeta(
     id='193ba2a8-c764-4507-8ab3-90447495d578',
@@ -19,15 +18,21 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Quantiles (quantiles).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
-    """
-    raise NotImplementedError('Concept implementation not yet added for slug: quantiles')
-
+    """Calculate quantiles of a numeric column."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    probabilities = params.get('probabilities', [0.25, 0.5, 0.75])
+    quantiles = {}
+    
+    for p in probabilities:
+        query = f"SELECT QUANTILE({column}, {p}) FROM dataset WHERE {column} IS NOT NULL"
+        result = ctx.con.execute(query).fetchone()
+        quantiles[f'q{int(p*100)}'] = float(result[0]) if result[0] is not None else None
+    
+    return {
+        'quantiles': quantiles,
+        'probabilities': probabilities,
+        'measure': column
+    }

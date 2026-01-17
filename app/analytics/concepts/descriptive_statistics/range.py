@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .._base import ConceptMeta
 
 META = ConceptMeta(
     id='fc4fa906-146b-430f-8494-44fa68315411',
@@ -19,15 +18,27 @@ META = ConceptMeta(
 )
 
 async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Range (range).
-
-    DuckDB is the primary analytics engine.
-    - ctx.con: duckdb connection
-    - dataset is mounted as view/table named `dataset`
-
-    Return a JSON-serializable dict. Prefer keys in META.output_keys.
-
-    This module is auto-generated scaffold; implement as needed.
+    """Calculate the range (max - min) of a numeric column."""
+    column = params.get('column', params.get('measure_column'))
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    query = f"""
+        SELECT 
+            MIN({column}) as min_val,
+            MAX({column}) as max_val,
+            MAX({column}) - MIN({column}) as range_val,
+            COUNT({column}) as valid_count
+        FROM dataset
+        WHERE {column} IS NOT NULL
     """
-    raise NotImplementedError('Concept implementation not yet added for slug: range')
-
+    
+    result = ctx.con.execute(query).fetchone()
+    
+    return {
+        'min': float(result[0]) if result[0] is not None else None,
+        'max': float(result[1]) if result[1] is not None else None,
+        'range': float(result[2]) if result[2] is not None else None,
+        'valid_count': int(result[3]),
+        'measure': column
+    }
