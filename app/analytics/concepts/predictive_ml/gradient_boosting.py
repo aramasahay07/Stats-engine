@@ -1,43 +1,46 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='2b50f21f-a85c-4ce0-a017-b2d710aa252f',
-    topic_id='8b2247d1-7415-41e7-b0c3-d5a81878ba3f',
+    id='gradient-boosting-final',
+    topic_id='topic-final',
     topic_slug='predictive-ml',
     slug='gradient-boosting',
     title='Gradient Boosting',
-    concept_type='model',
+    concept_type='metric',
     level='intermediate',
     status='published',
-    output_keys=['gradient_boosting', 'gbm'],
-    tags=['modeling'],
+    output_keys=['gradient_boosting'],
+    tags=['predictive-ml'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Gradient Boosting.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    import numpy as np
+    from sklearn.ensemble import GradientBoostingClassifier
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    x_cols = params.get('x_columns', [])
+    y_col = params.get('y_column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if not isinstance(x_cols, list):
+        x_cols = [x_cols]
+    
+    cols = x_cols + [y_col]
+    query = f"SELECT {', '.join(cols)} FROM dataset WHERE {' AND '.join([f'{c} IS NOT NULL' for c in cols])}"
+    data = np.array(ctx.con.execute(query).fetchall())
+    
+    X, y = data[:, :-1], data[:, -1]
+    
+    model = GradientBoostingClassifier(random_state=42)
+    model.fit(X, y)
     
     return {
-        'concept': 'gradient_boosting',
-        'status': 'enabled',
-        'message': 'Concept gradient_boosting is now operational',
-        'n': n,
-        'parameters': params
+        'feature_importances': {x_cols[i]: float(model.feature_importances_[i]) for i in range(len(x_cols))},
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

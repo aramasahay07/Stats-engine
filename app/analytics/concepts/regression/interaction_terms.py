@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='760dbf99-0518-4095-a539-65571608d48b',
-    topic_id='47670940-6e51-4e25-aa11-9f78987e5194',
+    id='interaction-terms-final',
+    topic_id='topic-final',
     topic_slug='regression',
     slug='interaction-terms',
     title='Interaction Terms',
-    concept_type='procedure',
+    concept_type='metric',
     level='intermediate',
     status='published',
     output_keys=['interaction_terms'],
@@ -18,26 +17,36 @@ META = ConceptMeta(
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Interaction Terms.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    x1 = params.get('x1_column')
+    x2 = params.get('x2_column')
+    y = params.get('y_column')
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    query = f"SELECT {x1}, {x2}, {y} FROM dataset WHERE {x1} IS NOT NULL AND {x2} IS NOT NULL AND {y} IS NOT NULL"
+    data = ctx.con.execute(query).fetchall()
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    import numpy as np
+    data = np.array(data)
+    
+    # Create interaction term
+    interaction = data[:, 0] * data[:, 1]
+    
+    from sklearn.linear_model import LinearRegression
+    X = np.column_stack([data[:, 0], data[:, 1], interaction])
+    y_data = data[:, 2]
+    
+    model = LinearRegression().fit(X, y_data)
     
     return {
-        'concept': 'interaction_terms',
-        'status': 'enabled',
-        'message': 'Concept interaction_terms is now operational',
-        'n': n,
-        'parameters': params
+        'coefficients': {
+            x1: float(model.coef_[0]),
+            x2: float(model.coef_[1]),
+            f'{x1}*{x2}': float(model.coef_[2]),
+        },
+        'intercept': float(model.intercept_),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

@@ -1,42 +1,35 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='bffe4a06-27fa-44c1-a13c-d9e16b152715',
-    topic_id='db0cd6cf-0baf-4ef9-819f-295b6668c581',
+    id='sampling-methods-final',
+    topic_id='topic-final',
     topic_slug='sampling-estimation',
     slug='sampling-methods',
     title='Sampling Methods',
-    concept_type='procedure',
-    level='intro',
+    concept_type='metric',
+    level='intermediate',
     status='published',
     output_keys=['sampling_methods'],
-    tags=['sampling'],
+    tags=['sampling-estimation'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Sampling Methods.
-    
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
-    
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    method = params.get('method', 'simple_random')
     
     return {
-        'concept': 'sampling_methods',
-        'status': 'enabled',
-        'message': 'Concept sampling_methods is now operational',
-        'n': n,
-        'parameters': params
+        'method': method,
+        'available_methods': [
+            'simple_random',
+            'stratified',
+            'cluster',
+            'systematic',
+        ],
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

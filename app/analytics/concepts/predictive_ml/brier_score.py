@@ -1,43 +1,41 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='50d04a1a-6a68-467a-889c-477549dde99d',
-    topic_id='8b2247d1-7415-41e7-b0c3-d5a81878ba3f',
+    id='brier-score-final',
+    topic_id='topic-final',
     topic_slug='predictive-ml',
     slug='brier-score',
     title='Brier Score',
     concept_type='metric',
-    level='advanced',
+    level='intermediate',
     status='published',
     output_keys=['brier_score'],
-    tags=['metrics'],
+    tags=['predictive-ml'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Brier Score.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from sklearn.metrics import brier_score_loss
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    y_true_col = params.get('y_true_column')
+    y_pred_proba_col = params.get('y_pred_proba_column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {y_true_col}, {y_pred_proba_col} FROM dataset WHERE {y_true_col} IS NOT NULL AND {y_pred_proba_col} IS NOT NULL"
+    data = ctx.con.execute(query).fetchall()
+    
+    y_true = [r[0] for r in data]
+    y_pred_proba = [r[1] for r in data]
+    
+    bs = brier_score_loss(y_true, y_pred_proba)
     
     return {
-        'concept': 'brier_score',
-        'status': 'enabled',
-        'message': 'Concept brier_score is now operational',
-        'n': n,
-        'parameters': params
+        'brier_score': float(bs),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

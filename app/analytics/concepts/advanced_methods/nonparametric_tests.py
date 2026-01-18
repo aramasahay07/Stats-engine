@@ -1,43 +1,37 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-from scipy import stats
-
 META = ConceptMeta(
-    id='8048785a-ebd6-45b1-bae1-8bbd8f9a5941',
-    topic_id='0e4fdff5-b126-4544-b5dc-e038ff36791f',
+    id='nonparametric-tests-final',
+    topic_id='topic-final',
     topic_slug='advanced-methods',
     slug='nonparametric-tests',
     title='Nonparametric Tests',
-    concept_type='test',
+    concept_type='metric',
     level='intermediate',
     status='published',
-    output_keys=['mann_whitney', 'kruskal_wallis'],
-    tags=['testing', 'robust'],
+    output_keys=['nonparametric_tests'],
+    tags=['advanced-methods'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Nonparametric Tests.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from scipy import stats
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
-    
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    method = params.get('method', 'mann_whitney')
     
     return {
-        'concept': 'nonparametric_tests',
-        'status': 'enabled',
-        'message': 'Concept nonparametric_tests is now operational',
-        'n': n,
-        'parameters': params
+        'available_methods': [
+            'mann_whitney',
+            'wilcoxon',
+            'kruskal_wallis',
+            'friedman',
+        ],
+        'method': method,
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

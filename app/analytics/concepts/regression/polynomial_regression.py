@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='984f9731-0501-48a7-95bd-e462cbc6a6c4',
-    topic_id='47670940-6e51-4e25-aa11-9f78987e5194',
+    id='polynomial-regression-func',
+    topic_id='topic-id',
     topic_slug='regression',
     slug='polynomial-regression',
     title='Polynomial Regression',
-    concept_type='model',
+    concept_type='metric',
     level='intermediate',
     status='published',
     output_keys=['polynomial_regression'],
@@ -18,26 +17,35 @@ META = ConceptMeta(
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Polynomial Regression.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Polynomial Regression - fully functional implementation."""
+    import numpy as np
+    from sklearn.preprocessing import PolynomialFeatures
+    from sklearn.linear_model import LinearRegression
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    x = params.get('x_column')
+    y = params.get('y_column')
+    degree = params.get('degree', 2)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {x}, {y} FROM dataset WHERE {x} IS NOT NULL AND {y} IS NOT NULL"
+    data = np.array(ctx.con.execute(query).fetchall())
+    
+    X = data[:, 0].reshape(-1, 1)
+    y_data = data[:, 1]
+    
+    poly = PolynomialFeatures(degree=degree)
+    X_poly = poly.fit_transform(X)
+    
+    model = LinearRegression().fit(X_poly, y_data)
+    r2 = model.score(X_poly, y_data)
     
     return {
-        'concept': 'polynomial_regression',
-        'status': 'enabled',
-        'message': 'Concept polynomial_regression is now operational',
-        'n': n,
-        'parameters': params
+        'coefficients': model.coef_.tolist(),
+        'intercept': float(model.intercept_),
+        'r_squared': float(r2),
+        'degree': degree,
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

@@ -1,42 +1,45 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='6a40f609-b742-491d-a5f5-1c27e43cc426',
-    topic_id='2db3d080-3856-421c-bd20-962496ef2b31',
+    id='box-plot-func',
+    topic_id='topic-id',
     topic_slug='visualization-eda',
     slug='box-plot',
     title='Box Plot',
-    concept_type='chart',
-    level='intro',
+    concept_type='metric',
+    level='intermediate',
     status='published',
-    output_keys=['boxplot', 'box_plot'],
-    tags=['visual'],
+    output_keys=['box_plot'],
+    tags=['visualization-eda'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Box Plot.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Box Plot - fully functional implementation."""
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    q1, median, q3 = np.percentile(data, [25, 50, 75])
+    iqr = q3 - q1
     
     return {
-        'concept': 'box_plot',
-        'status': 'enabled',
-        'message': 'Concept box_plot is now operational',
-        'n': n,
-        'parameters': params
+        'min': float(np.min(data)),
+        'q1': float(q1),
+        'median': float(median),
+        'q3': float(q3),
+        'max': float(np.max(data)),
+        'iqr': float(iqr),
+        'lower_whisker': float(q1 - 1.5 * iqr),
+        'upper_whisker': float(q3 + 1.5 * iqr),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

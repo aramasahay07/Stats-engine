@@ -1,43 +1,42 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='9715e555-2595-412d-994a-68eb06aad3c1',
-    topic_id='8b2247d1-7415-41e7-b0c3-d5a81878ba3f',
+    id='f1-score-func',
+    topic_id='topic-id',
     topic_slug='predictive-ml',
     slug='f1-score',
     title='F1 Score',
     concept_type='metric',
-    level='intro',
+    level='intermediate',
     status='published',
-    output_keys=['f1'],
-    tags=['metrics'],
+    output_keys=['f1_score'],
+    tags=['predictive-ml'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: F1 Score.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """F1 Score - fully functional implementation."""
+    from sklearn.metrics import f1_score
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    y_true_col = params.get('y_true_column')
+    y_pred_col = params.get('y_pred_column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {y_true_col}, {y_pred_col} FROM dataset WHERE {y_true_col} IS NOT NULL AND {y_pred_col} IS NOT NULL"
+    data = ctx.con.execute(query).fetchall()
+    
+    y_true = [r[0] for r in data]
+    y_pred = [r[1] for r in data]
+    
+    f1 = f1_score(y_true, y_pred, average='binary', zero_division=0)
     
     return {
-        'concept': 'f1_score',
-        'status': 'enabled',
-        'message': 'Concept f1_score is now operational',
-        'n': n,
-        'parameters': params
+        'f1_score': float(f1),
+        'f1': float(f1),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

@@ -1,43 +1,42 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='d5b400fa-8836-47e7-8081-9344f08ca7cb',
-    topic_id='8b2247d1-7415-41e7-b0c3-d5a81878ba3f',
+    id='log-loss-final',
+    topic_id='topic-final',
     topic_slug='predictive-ml',
     slug='log-loss',
     title='Log Loss',
     concept_type='metric',
-    level='advanced',
+    level='intermediate',
     status='published',
-    output_keys=['log_loss', 'cross_entropy'],
-    tags=['metrics'],
+    output_keys=['log_loss'],
+    tags=['predictive-ml'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Log Loss.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from sklearn.metrics import log_loss
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    y_true_col = params.get('y_true_column')
+    y_pred_proba_col = params.get('y_pred_proba_column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {y_true_col}, {y_pred_proba_col} FROM dataset WHERE {y_true_col} IS NOT NULL AND {y_pred_proba_col} IS NOT NULL"
+    data = ctx.con.execute(query).fetchall()
+    
+    y_true = [r[0] for r in data]
+    y_pred_proba = [r[1] for r in data]
+    
+    ll = log_loss(y_true, y_pred_proba)
     
     return {
-        'concept': 'log_loss',
-        'status': 'enabled',
-        'message': 'Concept log_loss is now operational',
-        'n': n,
-        'parameters': params
+        'log_loss': float(ll),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

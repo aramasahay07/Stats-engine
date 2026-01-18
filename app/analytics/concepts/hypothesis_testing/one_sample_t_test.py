@@ -1,43 +1,74 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-from scipy import stats
-
 META = ConceptMeta(
-    id='032c7a9d-4391-434f-b015-0fcb97b8f9d8',
+    id='b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e',
     topic_id='75d6fdc4-410c-4e17-87c7-2f6f5aff7f98',
     topic_slug='hypothesis-testing',
     slug='one-sample-t-test',
-    title='One-sample t-test',
+    title='One-Sample T-Test',
     concept_type='test',
     level='intro',
     status='published',
-    output_keys=['t_test_one_sample'],
-    tags=['test'],
+    output_keys=['one_sample_t_test', 't_test'],
+    tags=['hypothesis_test', 't_test'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: One Sample T Test.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Perform one-sample t-test."""
+    from scipy import stats
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
     column = params.get('column', params.get('measure_column'))
+    hypothesized_mean = params.get('hypothesized_mean', params.get('mu', 0))
+    alpha = params.get('alpha', 0.05)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if not column:
+        raise ValueError('column parameter is required')
+    
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL"
+    data = [row[0] for row in ctx.con.execute(query).fetchall()]
+    
+    if len(data) < 2:
+        return {'error': 'Need at least 2 data points', 'n': len(data)}
+    
+    t_stat, p_value = stats.ttest_1samp(data, hypothesized_mean)
+    
+    mean = np.mean(data)
+    std = np.std(data, ddof=1)
+    se = std / np.sqrt(len(data))
+    
+    # Confidence interval
+    df = len(data) - 1
+    t_crit = stats.t.ppf((1 + (1 - alpha)) / 2, df)
+    ci_lower = mean - t_crit * se
+    ci_upper = mean + t_crit * se
+    
+    # Cohen's d
+    cohens_d = (mean - hypothesized_mean) / std
     
     return {
-        'concept': 'one_sample_t_test',
-        'status': 'enabled',
-        'message': 'Concept one_sample_t_test is now operational',
-        'n': n,
-        'parameters': params
+        't_statistic': float(t_stat),
+        'p_value': float(p_value),
+        'significant': p_value < alpha,
+        'reject_null': p_value < alpha,
+        'sample_mean': float(mean),
+        'hypothesized_mean': float(hypothesized_mean),
+        'difference': float(mean - hypothesized_mean),
+        'sample_std': float(std),
+        'standard_error': float(se),
+        'confidence_level': 1 - alpha,
+        'ci_lower': float(ci_lower),
+        'ci_upper': float(ci_upper),
+        'cohens_d': float(cohens_d),
+        'n': len(data),
+        'df': int(df),
+        'alpha': float(alpha),
+        'column': column,
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

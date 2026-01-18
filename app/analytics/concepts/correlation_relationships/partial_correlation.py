@@ -1,44 +1,84 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-from scipy import stats
-
 META = ConceptMeta(
-    id='90db590e-a1c9-4c0b-8c44-8739fed3a77e',
+    id='be158621-e56c-4bhi-hdi8-bb09e49fe035',
     topic_id='67b7a540-6033-429e-bf49-507aac685ec8',
     topic_slug='correlation-relationships',
     slug='partial-correlation',
     title='Partial Correlation',
     concept_type='metric',
-    level='advanced',
+    level='intermediate',
     status='published',
-    output_keys=['partial_correlation'],
+    output_keys=['partial_correlation', 'partial_r'],
     tags=['relationship', 'control'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Partial Correlation.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Calculate partial correlation controlling for confounding variables."""
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
+    x_column = params.get('x_column')
+    y_column = params.get('y_column')
+    control_columns = params.get('control_columns', [])
+    
+    if not x_column or not y_column:
+        raise ValueError('Both x_column and y_column are required')
+    
+    if not isinstance(control_columns, list):
+        control_columns = [control_columns] if control_columns else []
+    
+    all_cols = [x_column, y_column] + control_columns
+    query = f"""
+        SELECT {', '.join(all_cols)}
+        FROM dataset
+        WHERE {' AND '.join([f"{c} IS NOT NULL" for c in all_cols])}
     """
-    column = params.get('column', params.get('measure_column'))
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
+    data = np.array(ctx.con.execute(query).fetchall())
+    
+    if len(data) < len(all_cols) + 2:
+        return {'error': 'Insufficient data', 'n': len(data)}
+    
+    X = data[:, 0]
+    Y = data[:, 1]
+    
+    if len(control_columns) > 0:
+        Z = data[:, 2:]
+        
+        # Regress X on Z, Y on Z
+        model_x = LinearRegression().fit(Z, X)
+        model_y = LinearRegression().fit(Z, Y)
+        
+        # Get residuals
+        res_x = X - model_x.predict(Z)
+        res_y = Y - model_y.predict(Z)
+        
+        # Correlate residuals
+        partial_r = np.corrcoef(res_x, res_y)[0, 1]
     else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+        # No controls = regular correlation
+        partial_r = np.corrcoef(X, Y)[0, 1]
+    
+    abs_r = abs(partial_r)
+    strength = 'strong' if abs_r >= 0.7 else 'moderate' if abs_r >= 0.4 else 'weak'
+    direction = 'positive' if partial_r > 0 else 'negative' if partial_r < 0 else 'none'
     
     return {
-        'concept': 'partial_correlation',
-        'status': 'enabled',
-        'message': 'Concept partial_correlation is now operational',
-        'n': n,
-        'parameters': params
+        'partial_correlation': float(partial_r),
+        'partial_r': float(partial_r),
+        'n': len(data),
+        'strength': strength,
+        'direction': direction,
+        'x_column': x_column,
+        'y_column': y_column,
+        'control_columns': control_columns,
+        'n_controls': len(control_columns),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

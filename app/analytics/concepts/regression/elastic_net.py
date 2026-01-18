@@ -1,43 +1,49 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='282ebec6-72cc-4f3f-b3fd-3719aae7a0a0',
-    topic_id='47670940-6e51-4e25-aa11-9f78987e5194',
+    id='elastic-net-func',
+    topic_id='topic-id',
     topic_slug='regression',
     slug='elastic-net',
     title='Elastic Net',
-    concept_type='model',
-    level='advanced',
+    concept_type='metric',
+    level='intermediate',
     status='published',
     output_keys=['elastic_net'],
-    tags=['regularization'],
+    tags=['regression'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Elastic Net.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Elastic Net - fully functional implementation."""
+    import numpy as np
+    from sklearn.linear_model import ElasticNet
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    x_cols = params.get('x_columns', [])
+    y_col = params.get('y_column')
+    alpha = params.get('alpha', 1.0)
+    l1_ratio = params.get('l1_ratio', 0.5)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if not isinstance(x_cols, list):
+        x_cols = [x_cols]
+    
+    cols = x_cols + [y_col]
+    query = f"SELECT {', '.join(cols)} FROM dataset WHERE {' AND '.join([f'{c} IS NOT NULL' for c in cols])}"
+    data = np.array(ctx.con.execute(query).fetchall())
+    
+    X, y = data[:, :-1], data[:, -1]
+    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=10000).fit(X, y)
     
     return {
-        'concept': 'elastic_net',
-        'status': 'enabled',
-        'message': 'Concept elastic_net is now operational',
-        'n': n,
-        'parameters': params
+        'coefficients': {x_cols[i]: float(model.coef_[i]) for i in range(len(x_cols))},
+        'intercept': float(model.intercept_),
+        'alpha': alpha,
+        'l1_ratio': l1_ratio,
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)
