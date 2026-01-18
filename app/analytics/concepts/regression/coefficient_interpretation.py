@@ -1,42 +1,36 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='060e8483-6697-4648-b16c-cc753d9655d7',
-    topic_id='47670940-6e51-4e25-aa11-9f78987e5194',
+    id='coefficient-interpretation-final',
+    topic_id='topic-final',
     topic_slug='regression',
     slug='coefficient-interpretation',
     title='Coefficient Interpretation',
-    concept_type='procedure',
-    level='intro',
+    concept_type='metric',
+    level='intermediate',
     status='published',
-    output_keys=['coefficients', 'betas'],
+    output_keys=['coefficient_interpretation'],
     tags=['regression'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Coefficient Interpretation.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    x = params.get('x_column')
+    y = params.get('y_column')
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
-    
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT REGR_SLOPE({y}, {x}) as slope, REGR_INTERCEPT({y}, {x}) as intercept FROM dataset WHERE {x} IS NOT NULL AND {y} IS NOT NULL"
+    result = ctx.con.execute(query).fetchone()
     
     return {
-        'concept': 'coefficient_interpretation',
-        'status': 'enabled',
-        'message': 'Concept coefficient_interpretation is now operational',
-        'n': n,
-        'parameters': params
+        'slope': float(result[0]),
+        'slope_interpretation': f'For each unit increase in {x}, {y} increases by {result[0]:.4f}',
+        'intercept': float(result[1]),
+        'intercept_interpretation': f'When {x} is 0, predicted {y} is {result[1]:.4f}',
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

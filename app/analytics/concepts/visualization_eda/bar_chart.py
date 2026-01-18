@@ -1,42 +1,34 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='1669f9fb-888e-4bf8-b8cb-744225d38510',
-    topic_id='2db3d080-3856-421c-bd20-962496ef2b31',
+    id='bar-chart-final',
+    topic_id='topic-final',
     topic_slug='visualization-eda',
     slug='bar-chart',
     title='Bar Chart',
-    concept_type='chart',
-    level='intro',
+    concept_type='metric',
+    level='intermediate',
     status='published',
     output_keys=['bar_chart'],
-    tags=['visual'],
+    tags=['visualization-eda'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Bar Chart.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    column = params.get('column')
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
-    
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column}, COUNT(*) as count FROM dataset WHERE {column} IS NOT NULL GROUP BY {column} ORDER BY count DESC LIMIT 20"
+    data = ctx.con.execute(query).fetchall()
     
     return {
-        'concept': 'bar_chart',
-        'status': 'enabled',
-        'message': 'Concept bar_chart is now operational',
-        'n': n,
-        'parameters': params
+        'categories': [r[0] for r in data],
+        'counts': [r[1] for r in data],
+        'n_categories': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

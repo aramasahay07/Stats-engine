@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='b13cc114-2cdc-4258-9683-c5c1f846709f',
-    topic_id='03d4f20c-5826-462f-9c77-bd30084e8037',
+    id='decomposition-final',
+    topic_id='topic-final',
     topic_slug='time-series',
     slug='decomposition',
-    title='Time Series Decomposition',
-    concept_type='procedure',
+    title='Decomposition',
+    concept_type='metric',
     level='intermediate',
     status='published',
     output_keys=['decomposition'],
@@ -18,26 +17,26 @@ META = ConceptMeta(
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Decomposition.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from statsmodels.tsa.seasonal import seasonal_decompose
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
+    period = params.get('period', 12)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL ORDER BY rowid"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    result = seasonal_decompose(data, model='additive', period=period)
     
     return {
-        'concept': 'decomposition',
-        'status': 'enabled',
-        'message': 'Concept decomposition is now operational',
-        'n': n,
-        'parameters': params
+        'trend': result.trend.tolist(),
+        'seasonal': result.seasonal.tolist(),
+        'residual': result.resid.tolist(),
+        'period': period,
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

@@ -1,44 +1,58 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-from scipy import stats
-
 META = ConceptMeta(
-    id='0d3f5288-97c5-413d-858a-9ca3100abac3',
-    topic_id='47670940-6e51-4e25-aa11-9f78987e5194',
+    id='residual-analysis-func',
+    topic_id='topic-id',
     topic_slug='regression',
     slug='residual-analysis',
     title='Residual Analysis',
-    concept_type='diagnostic',
+    concept_type='metric',
     level='intermediate',
     status='published',
-    output_keys=['residuals'],
-    tags=['regression', 'diagnostic'],
+    output_keys=['residual_analysis'],
+    tags=['regression'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Residual Analysis.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Residual Analysis - fully functional implementation."""
+    import numpy as np
+    from scipy import stats
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
+    x = params.get('x_column')
+    y = params.get('y_column')
+    
+    # Get regression and data
+    query = f"""
+        SELECT REGR_SLOPE({y}, {x}) as slope, REGR_INTERCEPT({y}, {x}) as intercept,
+               {x}, {y}
+        FROM dataset WHERE {x} IS NOT NULL AND {y} IS NOT NULL
     """
-    column = params.get('column', params.get('measure_column'))
+    data = ctx.con.execute(query).fetchall()
+    slope, intercept = data[0][0], data[0][1]
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    residuals = []
+    for row in data:
+        x_val, y_actual = row[2], row[3]
+        y_pred = intercept + slope * x_val
+        residuals.append(y_actual - y_pred)
+    
+    residuals = np.array(residuals)
+    
+    _, p_norm = stats.shapiro(residuals) if len(residuals) <= 5000 else stats.normaltest(residuals)
     
     return {
-        'concept': 'residual_analysis',
-        'status': 'enabled',
-        'message': 'Concept residual_analysis is now operational',
-        'n': n,
-        'parameters': params
+        'mean_residual': float(np.mean(residuals)),
+        'std_residual': float(np.std(residuals, ddof=1)),
+        'min_residual': float(np.min(residuals)),
+        'max_residual': float(np.max(residuals)),
+        'normality_p': float(p_norm),
+        'residuals_normal': p_norm > 0.05,
+        'n': len(residuals),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

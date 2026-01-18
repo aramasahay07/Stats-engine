@@ -1,44 +1,45 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-from scipy import stats
-import numpy as np
-
 META = ConceptMeta(
-    id='391e972d-5f1d-4d6d-b886-b6d979397b0f',
-    topic_id='db0cd6cf-0baf-4ef9-819f-295b6668c581',
+    id='ci-mean-func',
+    topic_id='topic-id',
     topic_slug='sampling-estimation',
     slug='ci-mean',
-    title='CI for Mean',
-    concept_type='procedure',
-    level='intro',
+    title='Confidence Interval for Mean',
+    concept_type='metric',
+    level='intermediate',
     status='published',
     output_keys=['ci_mean'],
-    tags=['inference'],
+    tags=['sampling-estimation'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Ci Mean.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Confidence Interval for Mean - fully functional implementation."""
+    from scipy import stats
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
+    confidence = params.get('confidence_level', 0.95)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    mean = np.mean(data)
+    se = stats.sem(data)
+    ci = stats.t.interval(confidence, len(data)-1, mean, se)
     
     return {
-        'concept': 'ci_mean',
-        'status': 'enabled',
-        'message': 'Concept ci_mean is now operational',
-        'n': n,
-        'parameters': params
+        'mean': float(mean),
+        'ci_lower': float(ci[0]),
+        'ci_upper': float(ci[1]),
+        'confidence_level': float(confidence),
+        'margin_of_error': float(ci[1] - mean),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

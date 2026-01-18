@@ -1,36 +1,45 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='665da7ca-233b-4048-91b2-eaebda8f3c6e',
+    id='fdr-001',
     topic_id='75d6fdc4-410c-4e17-87c7-2f6f5aff7f98',
     topic_slug='hypothesis-testing',
     slug='fdr',
-    title='False Discovery Rate (FDR)
+    title='False Discovery Rate (FDR)',
+    concept_type='adjustment',
+    level='advanced',
+    status='published',
+    output_keys=['fdr', 'q_values'],
+    tags=['hypothesis_test', 'multiple_testing'],
+    quality_score=80,
+)
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Fdr.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply Benjamini-Hochberg FDR correction."""
+    from statsmodels.stats.multitest import multipletests
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    p_values = params.get('p_values', [])
+    alpha = params.get('alpha', 0.05)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if not p_values:
+        raise ValueError('p_values list required')
+    
+    # Apply FDR correction
+    reject, p_adjusted, alphacSidak, alphacBonf = multipletests(p_values, alpha=alpha, method='fdr_bh')
+    
+    n_significant = sum(reject)
     
     return {
-        'concept': 'fdr',
-        'status': 'enabled',
-        'message': 'Concept fdr is now operational',
-        'n': n,
-        'parameters': params
+        'q_values': [float(p) for p in p_adjusted],
+        'reject_null': reject.tolist(),
+        'n_tests': len(p_values),
+        'n_significant': int(n_significant),
+        'alpha': float(alpha),
+        'method': 'Benjamini-Hochberg',
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

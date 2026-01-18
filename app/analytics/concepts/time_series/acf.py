@@ -1,36 +1,40 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='593d1374-54af-477f-8f2f-46c364895463',
-    topic_id='03d4f20c-5826-462f-9c77-bd30084e8037',
+    id='acf-final',
+    topic_id='topic-final',
     topic_slug='time-series',
     slug='acf',
-    title='Autocorrelation Function (ACF)
+    title='Acf',
+    concept_type='metric',
+    level='intermediate',
+    status='published',
+    output_keys=['acf'],
+    tags=['time-series'],
+    quality_score=80,
+)
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Acf.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from statsmodels.tsa.stattools import acf
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
+    nlags = params.get('nlags', 40)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL ORDER BY rowid"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    acf_vals = acf(data, nlags=nlags)
     
     return {
-        'concept': 'acf',
-        'status': 'enabled',
-        'message': 'Concept acf is now operational',
-        'n': n,
-        'parameters': params
+        'acf': acf_vals.tolist(),
+        'nlags': nlags,
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

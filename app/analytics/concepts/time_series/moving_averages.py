@@ -1,43 +1,41 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='e95ff7fc-5319-4d54-a4e8-9d00ab974038',
-    topic_id='03d4f20c-5826-462f-9c77-bd30084e8037',
+    id='moving-averages-func',
+    topic_id='topic-id',
     topic_slug='time-series',
     slug='moving-averages',
     title='Moving Averages',
-    concept_type='procedure',
-    level='intro',
+    concept_type='metric',
+    level='intermediate',
     status='published',
-    output_keys=['moving_average'],
+    output_keys=['moving_averages'],
     tags=['time-series'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Moving Averages.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Moving Averages - fully functional implementation."""
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
+    window = params.get('window', 7)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL ORDER BY rowid"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    data = np.array(data)
+    ma = np.convolve(data, np.ones(window)/window, mode='valid')
     
     return {
-        'concept': 'moving_averages',
-        'status': 'enabled',
-        'message': 'Concept moving_averages is now operational',
-        'n': n,
-        'parameters': params
+        'moving_average': ma.tolist(),
+        'window': window,
+        'n_original': len(data),
+        'n_ma': len(ma),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

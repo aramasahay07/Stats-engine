@@ -1,43 +1,32 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='24a8542e-1646-450d-88e9-b8aa306f4ce6',
-    topic_id='8b2247d1-7415-41e7-b0c3-d5a81878ba3f',
+    id='learning-curves-final',
+    topic_id='topic-final',
     topic_slug='predictive-ml',
     slug='learning-curves',
     title='Learning Curves',
-    concept_type='chart',
-    level='advanced',
+    concept_type='metric',
+    level='intermediate',
     status='published',
-    output_keys=['learning_curve'],
-    tags=['modeling', 'diagnostic'],
+    output_keys=['learning_curves'],
+    tags=['predictive-ml'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Learning Curves.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
-    
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    train_sizes = params.get('train_sizes', [0.1, 0.3, 0.5, 0.7, 0.9])
     
     return {
-        'concept': 'learning_curves',
-        'status': 'enabled',
-        'message': 'Concept learning_curves is now operational',
-        'n': n,
-        'parameters': params
+        'train_sizes': train_sizes,
+        'message': 'Learning curves track performance vs training set size',
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

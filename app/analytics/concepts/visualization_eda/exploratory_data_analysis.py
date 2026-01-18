@@ -1,35 +1,49 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='28e7f3d3-0bd2-49ee-a849-0cb5a5cc8c7e',
-    topic_id='2db3d080-3856-421c-bd20-962496ef2b31',
+    id='exploratory-data-analysis-final',
+    topic_id='topic-final',
     topic_slug='visualization-eda',
     slug='exploratory-data-analysis',
-    title='Exploratory Data Analysis (EDA)
+    title='Exploratory Data Analysis',
+    concept_type='metric',
+    level='intermediate',
+    status='published',
+    output_keys=['exploratory_data_analysis'],
+    tags=['visualization-eda'],
+    quality_score=80,
+)
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Exploratory Data Analysis.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    columns = params.get('columns', [])
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if not isinstance(columns, list):
+        columns = [columns]
+    
+    stats = {}
+    for col in columns:
+        query = f"SELECT {col} FROM dataset WHERE {col} IS NOT NULL"
+        data = [r[0] for r in ctx.con.execute(query).fetchall()]
+        
+        stats[col] = {
+            'count': len(data),
+            'mean': float(np.mean(data)),
+            'std': float(np.std(data)),
+            'min': float(np.min(data)),
+            'max': float(np.max(data)),
+            'median': float(np.median(data)),
+        }
     
     return {
-        'concept': 'exploratory_data_analysis',
-        'status': 'enabled',
-        'message': 'Concept exploratory_data_analysis is now operational',
-        'n': n,
-        'parameters': params
+        'column_statistics': stats,
+        'n_columns': len(columns),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

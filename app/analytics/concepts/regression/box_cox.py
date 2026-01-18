@@ -1,43 +1,40 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-from scipy import stats
-
 META = ConceptMeta(
-    id='dc666154-a387-4d1f-8a8a-043eeccb9a9e',
-    topic_id='47670940-6e51-4e25-aa11-9f78987e5194',
+    id='box-cox-final',
+    topic_id='topic-final',
     topic_slug='regression',
     slug='box-cox',
-    title='Box-Cox Transformation',
-    concept_type='procedure',
-    level='advanced',
+    title='Box Cox',
+    concept_type='metric',
+    level='intermediate',
     status='published',
     output_keys=['box_cox'],
-    tags=['transformations'],
+    tags=['regression'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Box Cox.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from scipy import stats
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL AND {column} > 0"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    transformed, lmbda = stats.boxcox(data)
     
     return {
-        'concept': 'box_cox',
-        'status': 'enabled',
-        'message': 'Concept box_cox is now operational',
-        'n': n,
-        'parameters': params
+        'lambda': float(lmbda),
+        'transformed_mean': float(np.mean(transformed)),
+        'transformed_std': float(np.std(transformed)),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

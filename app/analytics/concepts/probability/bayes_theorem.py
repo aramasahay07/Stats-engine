@@ -1,42 +1,41 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='74b2040f-6a58-4ed0-a6cc-fed7f9ecc402',
-    topic_id='e5a31222-37a6-4e5c-9a86-86f7cca0a382',
+    id='bayes-theorem-func',
+    topic_id='topic-id',
     topic_slug='probability',
     slug='bayes-theorem',
-    title='Bayes’ Theorem',
-    concept_type='procedure',
+    title='Bayes' Theorem',
+    concept_type='metric',
     level='intermediate',
     status='published',
-    output_keys=['bayes'],
-    tags=['probability', 'bayesian'],
+    output_keys=['bayes_theorem'],
+    tags=['probability'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Bayes Theorem.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Bayes' Theorem - fully functional implementation."""
+    p_a = params.get('p_a')
+    p_b_given_a = params.get('p_b_given_a')
+    p_b = params.get('p_b')
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    if None in [p_a, p_b_given_a, p_b]:
+        raise ValueError('p_a, p_b_given_a, and p_b required')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    # P(A|B) = P(B|A) * P(A) / P(B)
+    p_a_given_b = (p_b_given_a * p_a) / p_b
     
     return {
-        'concept': 'bayes_theorem',
-        'status': 'enabled',
-        'message': 'Concept bayes_theorem is now operational',
-        'n': n,
-        'parameters': params
+        'posterior': float(p_a_given_b),
+        'p_a_given_b': float(p_a_given_b),
+        'prior': float(p_a),
+        'likelihood': float(p_b_given_a),
+        'marginal': float(p_b),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

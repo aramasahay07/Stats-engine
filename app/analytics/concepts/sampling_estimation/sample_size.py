@@ -1,44 +1,47 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-from scipy import stats
-import numpy as np
-
 META = ConceptMeta(
-    id='6eb192d7-c063-4472-86bd-157b3b989c1b',
-    topic_id='db0cd6cf-0baf-4ef9-819f-295b6668c581',
+    id='sample-size-final',
+    topic_id='topic-final',
     topic_slug='sampling-estimation',
     slug='sample-size',
-    title='Sample Size Planning',
-    concept_type='procedure',
+    title='Sample Size',
+    concept_type='metric',
     level='intermediate',
     status='published',
-    output_keys=['sample_size', 'n_required'],
-    tags=['planning', 'power'],
+    output_keys=['sample_size'],
+    tags=['sampling-estimation'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Sample Size.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    from scipy import stats
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    effect_size = params.get('effect_size')
+    alpha = params.get('alpha', 0.05)
+    power = params.get('power', 0.8)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if effect_size is None:
+        raise ValueError('effect_size required')
+    
+    # Sample size calculation for t-test
+    z_alpha = stats.norm.ppf(1 - alpha/2)
+    z_beta = stats.norm.ppf(power)
+    
+    n = (2 * (z_alpha + z_beta)**2) / (effect_size**2)
     
     return {
-        'concept': 'sample_size',
-        'status': 'enabled',
-        'message': 'Concept sample_size is now operational',
-        'n': n,
-        'parameters': params
+        'required_sample_size': int(np.ceil(n)),
+        'per_group': int(np.ceil(n/2)),
+        'effect_size': float(effect_size),
+        'alpha': float(alpha),
+        'power': float(power),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

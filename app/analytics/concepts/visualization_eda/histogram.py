@@ -1,42 +1,40 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='0385df0e-80ba-46b4-8a86-0e9b5bc02676',
-    topic_id='2db3d080-3856-421c-bd20-962496ef2b31',
+    id='histogram-func',
+    topic_id='topic-id',
     topic_slug='visualization-eda',
     slug='histogram',
     title='Histogram',
-    concept_type='chart',
-    level='intro',
+    concept_type='metric',
+    level='intermediate',
     status='published',
     output_keys=['histogram'],
-    tags=['visual'],
+    tags=['visualization-eda'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Histogram.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Histogram - fully functional implementation."""
+    import numpy as np
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
+    bins = params.get('bins', 30)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    counts, bin_edges = np.histogram(data, bins=bins)
     
     return {
-        'concept': 'histogram',
-        'status': 'enabled',
-        'message': 'Concept histogram is now operational',
-        'n': n,
-        'parameters': params
+        'counts': counts.tolist(),
+        'bin_edges': bin_edges.tolist(),
+        'bins': bins,
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

@@ -1,43 +1,48 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-import numpy as np
-
 META = ConceptMeta(
-    id='c73307db-10f9-4303-b5a5-436c75875777',
-    topic_id='8b2247d1-7415-41e7-b0c3-d5a81878ba3f',
+    id='random-forest-final',
+    topic_id='topic-final',
     topic_slug='predictive-ml',
     slug='random-forest',
     title='Random Forest',
-    concept_type='model',
+    concept_type='metric',
     level='intermediate',
     status='published',
     output_keys=['random_forest'],
-    tags=['modeling'],
+    tags=['predictive-ml'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Random Forest.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    x_cols = params.get('x_columns', [])
+    y_col = params.get('y_column')
+    n_estimators = params.get('n_estimators', 100)
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    if not isinstance(x_cols, list):
+        x_cols = [x_cols]
+    
+    cols = x_cols + [y_col]
+    query = f"SELECT {', '.join(cols)} FROM dataset WHERE {' AND '.join([f'{c} IS NOT NULL' for c in cols])}"
+    data = np.array(ctx.con.execute(query).fetchall())
+    
+    X, y = data[:, :-1], data[:, -1]
+    
+    model = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
+    model.fit(X, y)
     
     return {
-        'concept': 'random_forest',
-        'status': 'enabled',
-        'message': 'Concept random_forest is now operational',
-        'n': n,
-        'parameters': params
+        'n_estimators': n_estimators,
+        'feature_importances': {x_cols[i]: float(model.feature_importances_[i]) for i in range(len(x_cols))},
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)

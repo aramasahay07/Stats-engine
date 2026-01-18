@@ -1,42 +1,41 @@
 from __future__ import annotations
 
+from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
-
 META = ConceptMeta(
-    id='a6fbe3ac-2f1f-47e5-92b4-55c00a3e05a7',
-    topic_id='2db3d080-3856-421c-bd20-962496ef2b31',
+    id='density-plot-final',
+    topic_id='topic-final',
     topic_slug='visualization-eda',
     slug='density-plot',
     title='Density Plot',
-    concept_type='chart',
+    concept_type='metric',
     level='intermediate',
     status='published',
-    output_keys=['density_plot', 'kde'],
-    tags=['visual'],
+    output_keys=['density_plot'],
+    tags=['visualization-eda'],
     quality_score=80,
 )
 
-async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute concept: Density Plot.
+async def execute_analysis(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fully functional implementation."""
+    import numpy as np
+    from scipy.stats import gaussian_kde
     
-    This concept has been enabled for backend processing.
-    Implementation uses DuckDB and statistical libraries.
-    """
-    column = params.get('column', params.get('measure_column'))
+    column = params.get('column')
     
-    # Basic validation
-    if column:
-        query = f"SELECT COUNT(*) as n FROM dataset WHERE {column} IS NOT NULL"
-        result = ctx.con.execute(query).fetchone()
-        n = result[0] if result else 0
-    else:
-        n = ctx.con.execute("SELECT COUNT(*) FROM dataset").fetchone()[0]
+    query = f"SELECT {column} FROM dataset WHERE {column} IS NOT NULL"
+    data = [r[0] for r in ctx.con.execute(query).fetchall()]
+    
+    kde = gaussian_kde(data)
+    x_range = np.linspace(min(data), max(data), 100)
+    density = kde(x_range)
     
     return {
-        'concept': 'density_plot',
-        'status': 'enabled',
-        'message': 'Concept density_plot is now operational',
-        'n': n,
-        'parameters': params
+        'x_values': x_range.tolist(),
+        'density': density.tolist(),
+        'n': len(data),
     }
+
+async def run(ctx: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    return await run_concept(META, ctx, params, execute_analysis=execute_analysis)
