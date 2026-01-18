@@ -46,6 +46,8 @@ class DuckDBEngine:
                 f"CREATE OR REPLACE VIEW {view} AS "
                 f"SELECT * FROM read_parquet('{p}')"
             )
+            # Stable alias used by concept SQL (FROM dataset)
+            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM {view}")
             return view
         except Exception as e1:
             first_err = e1
@@ -75,6 +77,9 @@ class DuckDBEngine:
                 f"CREATE OR REPLACE VIEW {view} AS "
                 f"SELECT {select_sql} FROM read_parquet('{p}')"
             )
+
+            # Stable alias used by concept SQL (FROM dataset)
+            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM {view}")
             return view
 
         except Exception as e2:
