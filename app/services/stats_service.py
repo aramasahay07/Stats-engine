@@ -95,7 +95,84 @@ def _hash_spec(
 
 def _quote(c: str) -> str:
     """Safely quote column names for SQL queries."""
+    c = c.replace('"', '""')
     return f'"{c}"'
+# ============================================================================
+# CONCEPTS DISPATCH (Concepts are primary engine)
+# ============================================================================
+import importlib
+from app.analytics.concepts.registry import iter_concept_modules
+
+_CONCEPT_MODULES_BY_SLUG: Optional[Dict[str, Any]] = None
+
+def _load_concept_modules_by_slug() -> Dict[str, Any]:
+    """
+    Build a {slug -> module} map by importing all concept modules once.
+    We do this here so concepts can be the primary engine without editing 100+ files.
+    """
+    global _CONCEPT_MODULES_BY_SLUG
+    if _CONCEPT_MODULES_BY_SLUG is not None:
+        return _CONCEPT_MODULES_BY_SLUG
+
+    mapping: Dict[str, Any] = {}
+    for modname in iter_concept_modules():
+        mod = importlib.import_module(modname)
+        meta = getattr(mod, "META", None)
+        if meta is not None and getattr(meta, "slug", None):
+            mapping[meta.slug] = mod
+
+    _CONCEPT_MODULES_BY_SLUG = mapping
+    return mapping
+
+def _get_concept_module(slug: str) -> Optional[Any]:
+    return _load_concept_modules_by_slug().get(slug)
+
+def _is_quoted_identifier(s: str) -> bool:
+    s = s.strip()
+    return len(s) >= 2 and s[0] == '"' and s[-1] == '"'
+
+def _normalize_concept_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Quote any column identifier params centrally so concept SQL like AVG({column})
+    works even for column names like 'Admission Date' without editing concept files.
+
+    Convention:
+      - keys ending with _column or named 'column'/'x'/'y'/'before'/'after'/etc => identifier
+      - lists under *_columns or 'columns' => list of identifiers
+    """
+    IDENT_KEYS = {
+        "column", "x", "y",
+        "before", "after",
+        "measure_column", "group_column",
+        "value_col", "group_col",
+        "time_col", "observed_col", "expected_col",
+        "target", "feature",
+    }
+
+    out = dict(params)
+
+    for k, v in params.items():
+        # single identifier
+        if isinstance(v, str) and (k in IDENT_KEYS or k.endswith("_column") or k.endswith("_col")):
+            if v and not _is_quoted_identifier(v):
+                out[k] = _quote(v)
+
+        # list of identifiers
+        if isinstance(v, list) and (k in ("columns",) or k.endswith("_columns")):
+            quoted = []
+            for item in v:
+                if isinstance(item, str) and item and not _is_quoted_identifier(item):
+                    quoted.append(_quote(item))
+                else:
+                    quoted.append(item)
+            out[k] = quoted
+
+    return out
+
+class _ConceptCtx:
+    """Minimal context object expected by concepts (ctx.con)."""
+    def __init__(self, con):
+        self.con = con
 
 
 async def _get_parquet_local(user_id: str, dataset_id: str) -> Path:
@@ -1103,13 +1180,12 @@ async def run_stats(
     user_id: str,
     dataset_id: str,
     analysis: str,
-    params: Dict[str, Any]    
+    params: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], bool]:
-    """
-    Main routing function for statistical analyses.
-    
+    """Main routing function for statistical analyses.
+
     Returns: (result_dict, is_cached)
-    
+
     Supported analyses:
     - Descriptive: descriptives, detailed_descriptives
     - Correlation: correlation, correlation_matrix
@@ -1122,34 +1198,45 @@ async def run_stats(
     - Time Series: moving_average, trend_analysis
     - Outliers: outlier_detection
     """
-    # ✅ PUT THIS HERE (after docstring, before any params usage)
+
+    # Normalize params coming from API (may be None/str/etc.)
     params = ensure_dict(params)
 
-    # --- Concept slug aliases ---
-    # The preferred contract is to call this endpoint with a concept slug.
-    # Internally we map slugs to concrete analysis implementations.
-    alias = {
-        # tests
-        "one-sample-t-test": "ttest_1samp",
-        "two-sample-t-test": "ttest_2samp",
-        "paired-t-test": "paired_ttest",
-        "one-way-anova": "anova_oneway",
-        "anova-one-way": "anova_oneway",
-        "pearson-correlation": "correlation",
-        "spearman-correlation": "correlation",
-        "linear-regression": "regression_ols",
-        "simple-linear-regression": "regression_ols",
-        # metrics/bundles
-        "descriptive-statistics": "descriptives",
-        "summary-statistics": "descriptives",
-        "standard-deviation": "descriptives",
-        "mean": "descriptives",
-        "median": "detailed_descriptives",
-        "quartiles": "detailed_descriptives",
-    }
-    analysis = alias.get(analysis, analysis)
+    # Keep the original slug the frontend sent
+    analysis_requested = analysis
+
+    # If a concept exists for this slug, it becomes the primary implementation
+    concept_mod = _get_concept_module(analysis_requested)
+
+    # Only apply legacy alias mapping when there is NO concept for this slug
+    analysis_mapped = analysis
+    if concept_mod is None:
+        # --- Concept slug aliases ---
+        # The preferred contract is to call this endpoint with a concept slug.
+        # Internally we map slugs to concrete analysis implementations.
+        alias = {
+            # tests
+            "one-sample-t-test": "ttest_1samp",
+            "two-sample-t-test": "ttest_2samp",
+            "paired-t-test": "paired_ttest",
+            "one-way-anova": "anova_oneway",
+            "anova-one-way": "anova_oneway",
+            "pearson-correlation": "correlation",
+            "spearman-correlation": "correlation",
+            "linear-regression": "regression_ols",
+            "simple-linear-regression": "regression_ols",
+            # metrics/bundles
+            "descriptive-statistics": "descriptives",
+            "summary-statistics": "descriptives",
+            "standard-deviation": "descriptives",
+            "mean": "descriptives",
+            "median": "detailed_descriptives",
+            "quartiles": "detailed_descriptives",
+        }
+        analysis_mapped = alias.get(analysis, analysis)
+
     # ------------------------------------------------------------------
-    # Check cache first (lineage-safe)
+    # Check cache first (lineage-safe) — for BOTH concept + legacy paths
     # ------------------------------------------------------------------
     meta = await registry.fetchrow(
         """
@@ -1161,6 +1248,7 @@ async def run_stats(
         dataset_id,
         user_id,
     )
+
     profile = ensure_dict(meta["profile_json"]) if meta else {}
     if not profile:
         raise ValueError("Dataset profile not available; cannot compute stats safely")
@@ -1170,15 +1258,18 @@ async def run_stats(
         "parquet_sha": profile.get("parquet_sha"),
         "pipeline_hash": profile.get("pipeline_hash", "__none__"),
         "engine_version": profile.get("engine_version"),
-     }
-
+    }
 
     snapshot_id = hashlib.sha256(
-               json.dumps(snapshot_payload, sort_keys=True).encode("utf-8")
+        json.dumps(snapshot_payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
+
+    # Use the mapped legacy analysis name for legacy cache keys; use the requested slug for concepts.
+    analysis_for_hash = analysis_requested if concept_mod is not None else analysis_mapped
+
     h = _hash_spec(
         dataset_id=dataset_id,
-        analysis=analysis,
+        analysis=analysis_for_hash,
         params=params,
         parquet_ref=profile.get("parquet_ref"),
         parquet_sha=profile.get("parquet_sha"),
@@ -1191,129 +1282,182 @@ async def run_stats(
         cached["_snapshot_id"] = snapshot_id
         return cached, True
 
-    # Route to appropriate analysis function
-    result = None
-    
+    # ------------------------------------------------------------------
+    # Concept execution (PRIMARY path) after cache miss
+    # ------------------------------------------------------------------
+    if concept_mod is not None:
+        parquet = await _get_parquet_local(user_id, dataset_id)
+        eng = DuckDBEngine(user_id)
+        con = eng.connect()
+
+        try:
+            view = eng.register_parquet(con, dataset_id, parquet)
+
+            # Concepts typically query FROM dataset
+            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM {view}")
+
+            ctx = _ConceptCtx(con)
+            concept_params = _normalize_concept_params(params)
+
+            result = await concept_mod.run(ctx, concept_params)
+
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+        # Match legacy return shape
+        result["_snapshot_id"] = snapshot_id
+
+        await cache_put(
+            user_id,
+            dataset_id,
+            h,
+            {"analysis": analysis_requested, "params": params, "snapshot_id": snapshot_id},
+            result,
+        )
+
+        return result, False
+
+    # ------------------------------------------------------------------
+    # Legacy routing (fallback when no concept exists)
+    # ------------------------------------------------------------------
+    analysis = analysis_mapped
+    result: Optional[Dict[str, Any]] = None
+
     # DESCRIPTIVE STATISTICS
     if analysis == "descriptives":
         result = await descriptives(user_id, dataset_id, params.get("columns", []))
-    
+
     elif analysis == "detailed_descriptives":
         result = await detailed_descriptives(user_id, dataset_id, params.get("columns", []))
-    
+
     # CORRELATION
     elif analysis == "correlation":
         result = await correlation(
-            user_id, dataset_id,
-            params["x"], params["y"],
-            params.get("method", "pearson")
+            user_id,
+            dataset_id,
+            params["x"],
+            params["y"],
+            params.get("method", "pearson"),
         )
-    
+
     elif analysis == "correlation_matrix":
         result = await correlation_matrix(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["columns"],
-            params.get("method", "pearson")
+            params.get("method", "pearson"),
         )
-    
+
     # T-TESTS
     elif analysis == "ttest_1samp":
         result = await ttest_1samp(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["column"],
-            params["pop_mean"]
+            params["pop_mean"],
         )
-    
+
     elif analysis == "ttest_2samp" or analysis == "ttest":
         result = await ttest_2samp(user_id, dataset_id, params["x"], params["y"])
-    
+
     elif analysis == "paired_ttest":
         result = await paired_ttest(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["before"],
-            params["after"]
+            params["after"],
         )
-    
+
     # ANOVA
     elif analysis == "anova_oneway" or analysis == "anova":
         result = await anova_oneway(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["value_col"],
-            params["group_col"]
+            params["group_col"],
         )
-    
+
     # CHI-SQUARE
     elif analysis == "chi_square_goodness":
         result = await chi_square_goodness(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["observed_col"],
-            params.get("expected_col")
+            params.get("expected_col"),
         )
-    
+
     elif analysis == "chi_square_independence":
         result = await chi_square_independence(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["var1"],
-            params["var2"]
+            params["var2"],
         )
-    
+
     # NONPARAMETRIC TESTS
     elif analysis == "mann_whitney":
         result = await mann_whitney(user_id, dataset_id, params["x"], params["y"])
-    
+
     elif analysis == "wilcoxon_signed_rank":
         result = await wilcoxon_signed_rank(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["before"],
-            params["after"]
+            params["after"],
         )
-    
+
     elif analysis == "kruskal_wallis":
         result = await kruskal_wallis(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["value_col"],
-            params["group_col"]
+            params["group_col"],
         )
-    
+
     # NORMALITY
     elif analysis == "normality_test":
         result = await normality_test(user_id, dataset_id, params["column"])
-    
+
     # REGRESSION
     elif analysis == "regression_ols" or analysis == "regression":
         result = await regression_ols(user_id, dataset_id, params["y"], params["X"])
-    
+
     elif analysis == "logistic_regression":
         result = await logistic_regression(user_id, dataset_id, params["y"], params["X"])
-    
+
     # TIME SERIES
     elif analysis == "moving_average":
         result = await moving_average(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["column"],
-            params.get("window", 7)
+            params.get("window", 7),
         )
-    
+
     elif analysis == "trend_analysis":
         result = await trend_analysis(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["value_col"],
-            params.get("time_col")
+            params.get("time_col"),
         )
-    
+
     # OUTLIERS
     elif analysis == "outlier_detection":
         result = await outlier_detection(
-            user_id, dataset_id,
+            user_id,
+            dataset_id,
             params["column"],
             params.get("method", "zscore"),
-            params.get("threshold", 3.0)
+            params.get("threshold", 3.0),
         )
-    
+
     else:
         raise ValueError(f"Unsupported analysis: {analysis}")
-    
-    # Cache the result
+
     # Cache the result
     result["_snapshot_id"] = snapshot_id
 
