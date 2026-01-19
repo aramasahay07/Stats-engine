@@ -1,0 +1,57 @@
+
+# ============================================================
+# Stats Engine (DuckDB-only) — Environment Configuration
+# ============================================================
+
+# ----------------------------
+# Supabase Configuration
+# ----------------------------
+SUPABASE_URL=https://xbtoaxsqajvyoydccyqx.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhidG9heHNxYWp2eW95ZGNjeXF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk4NjgwNjgsImV4cCI6MjA2NTQ0NDA2OH0.YpVK-Js0394YsPtwCk6XLiOtxZVxnVEecpqjo4BpWNs
+
+DATABASE_URL=postgresql://postgres:F3ZZm7nWM9dRScsA@db.xbtoaxsqajvyoydccyqx.supabase.co:5432/postgres?sslmode=require
+DB_ENABLED=true
+
+# ⚠️ GET THIS FROM: https://supabase.com/dashboard/project/xbtoaxsqajvyoydccyqx/settings/api
+# Look for "service_role" key (secret) - DO NOT share publicly
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhidG9heHNxYWp2eW95ZGNjeXF4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjI4MTAxOSwiZXhwIjoyMDgxNjQxMDE5fQ.KIoRMG--KMOnxwMfReDLc5gHrXnLtIvUPMps_lQUQ7I
+
+# Storage bucket for datasets
+SUPABASE_STORAGE_BUCKET=datasets
+
+# ----------------------------
+# OpenAI (Optional for Python backend)
+# ----------------------------
+# If your Python backend needs to call OpenAI directly (not just edge functions)
+# Get from: https://platform.openai.com/api-keys
+OPENAI_API_KEY=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
+
+# ----------------------------
+# Backend Auth
+# ----------------------------
+AUTH_DISABLED=true
+
+# ----------------------------
+# DuckDB / Query Safety Limits
+# ----------------------------
+DUCKDB_MEMORY_MB=1024
+QUERY_TIMEOUT_SECONDS=120
+MAX_QUERY_ROWS=25000
+
+# ----------------------------
+# Server Configuration
+# ----------------------------
+APP_HOST=0.0.0.0
+APP_PORT=8000
+LOG_LEVEL=info
+
+# ----------------------------
+# Local Cache (for downloaded files)
+# ----------------------------
+LOCAL_CACHE_DIR=.cache
+
+# ----------------------------
+# CORS Configuration
+# ----------------------------
+CORS_ALLOW_ORIGINS=http://localhost:5173,https://lovable.dev,https://xbtoaxsqajvyoydccyqx.lovable.app
+
