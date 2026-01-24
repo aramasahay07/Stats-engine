@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     # OpenAI (optional)
     # -------------------------
     openai_api_key: Optional[str] = Field(None, alias="OPENAI_API_KEY")
+    openai_model: str = Field("gpt-3.5-turbo", alias="OPENAI_MODEL")
+
+    # -------------------------
+    # AI Analyst Configuration
+    # -------------------------
+    analyst_alpha_threshold: float = Field(0.05, alias="ANALYST_ALPHA_THRESHOLD")
+    analyst_missing_high_pct: float = Field(0.3, alias="ANALYST_MISSING_HIGH_PCT")
+    analyst_missing_med_pct: float = Field(0.1, alias="ANALYST_MISSING_MED_PCT")
+    analyst_outlier_iqr_multiplier: float = Field(3.0, alias="ANALYST_OUTLIER_IQR_MULT")
+    analyst_chart_width: int = Field(400, alias="ANALYST_CHART_WIDTH")
+    analyst_chart_height: int = Field(300, alias="ANALYST_CHART_HEIGHT")
 
     # -------------------------
     # CORS

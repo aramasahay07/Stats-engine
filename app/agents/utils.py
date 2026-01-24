@@ -417,3 +417,46 @@ def get_required_columns_for_analysis(analysis_slug: str) -> Dict[str, str]:
         },
     }
     return requirements.get(analysis_slug, {})
+
+
+def normalize_stats_params(analysis_slug: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize parameter names for compatibility with stats_service.
+
+    The analyst agent uses semantic parameter names like 'measure_column' and 'group_column',
+    but some legacy stats_service functions expect 'value_col' and 'group_col'.
+    This function adds aliases to ensure compatibility with both concept modules
+    (which accept the semantic names) and legacy functions.
+
+    Args:
+        analysis_slug: The analysis being performed
+        params: The parameters from the analyst agent
+
+    Returns:
+        Parameters with added aliases for compatibility
+    """
+    normalized = dict(params)
+
+    # Add legacy aliases for group comparison tests
+    if 'measure_column' in params and 'value_col' not in params:
+        normalized['value_col'] = params['measure_column']
+
+    if 'group_column' in params and 'group_col' not in params:
+        normalized['group_col'] = params['group_column']
+
+    # Add time series aliases
+    if 'time_column' in params and 'time_col' not in params:
+        normalized['time_col'] = params['time_column']
+
+    if 'measure_column' in params and 'column' not in params:
+        # For single-column analyses
+        normalized['column'] = params['measure_column']
+
+    # Ensure chi-square compatibility
+    if analysis_slug in ['chi-square-test', 'chi_square_independence']:
+        if 'x' in params and 'var1' not in params:
+            normalized['var1'] = params['x']
+        if 'y' in params and 'var2' not in params:
+            normalized['var2'] = params['y']
+
+    return normalized

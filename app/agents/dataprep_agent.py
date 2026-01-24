@@ -11,8 +11,14 @@ Analyzes dataset profiles to detect data quality issues including:
 Outputs issues with severity levels and suggested fixes using existing transformers.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from .models import DataIssue, TransformStep, DataPrepResult
+
+# Import settings for configurable thresholds
+try:
+    from app.config import settings
+except ImportError:
+    settings = None
 
 
 class DataPrepAgent:
@@ -23,15 +29,31 @@ class DataPrepAgent:
     Suggests fixes using available transformer operations.
     """
 
-    # Thresholds for issue severity
-    MISSING_HIGH_THRESHOLD = 0.3  # >30% missing -> high severity
-    MISSING_MED_THRESHOLD = 0.1   # >10% missing -> medium severity
-    OUTLIER_IQR_MULTIPLIER = 3.0  # 3x IQR for outlier detection
-    CARDINALITY_HIGH_THRESHOLD = 0.95  # >95% unique in categorical -> warning
+    # Default thresholds (can be overridden via settings)
+    DEFAULT_MISSING_HIGH_THRESHOLD = 0.3  # >30% missing -> high severity
+    DEFAULT_MISSING_MED_THRESHOLD = 0.1   # >10% missing -> medium severity
+    DEFAULT_OUTLIER_IQR_MULTIPLIER = 3.0  # 3x IQR for outlier detection
+    DEFAULT_CARDINALITY_HIGH_THRESHOLD = 0.95  # >95% unique in categorical -> warning
 
     def __init__(self):
-        """Initialize the DataPrepAgent."""
-        pass
+        """Initialize the DataPrepAgent with configurable thresholds."""
+        # Use settings if available, otherwise use defaults
+        if settings is not None:
+            self.MISSING_HIGH_THRESHOLD = getattr(
+                settings, 'analyst_missing_high_pct', self.DEFAULT_MISSING_HIGH_THRESHOLD
+            )
+            self.MISSING_MED_THRESHOLD = getattr(
+                settings, 'analyst_missing_med_pct', self.DEFAULT_MISSING_MED_THRESHOLD
+            )
+            self.OUTLIER_IQR_MULTIPLIER = getattr(
+                settings, 'analyst_outlier_iqr_multiplier', self.DEFAULT_OUTLIER_IQR_MULTIPLIER
+            )
+            self.CARDINALITY_HIGH_THRESHOLD = self.DEFAULT_CARDINALITY_HIGH_THRESHOLD
+        else:
+            self.MISSING_HIGH_THRESHOLD = self.DEFAULT_MISSING_HIGH_THRESHOLD
+            self.MISSING_MED_THRESHOLD = self.DEFAULT_MISSING_MED_THRESHOLD
+            self.OUTLIER_IQR_MULTIPLIER = self.DEFAULT_OUTLIER_IQR_MULTIPLIER
+            self.CARDINALITY_HIGH_THRESHOLD = self.DEFAULT_CARDINALITY_HIGH_THRESHOLD
 
     async def analyze(
         self,
@@ -94,7 +116,7 @@ class DataPrepAgent:
         col_name: str,
         col_info: Dict[str, Any],
         profile: Dict[str, Any],
-    ) -> tuple[List[DataIssue], List[TransformStep]]:
+    ) -> Tuple[List[DataIssue], List[TransformStep]]:
         """Analyze a single column for issues."""
         issues: List[DataIssue] = []
         fixes: List[TransformStep] = []
@@ -177,7 +199,7 @@ class DataPrepAgent:
         self,
         col_name: str,
         numeric_summary: Dict[str, Any],
-    ) -> tuple[List[DataIssue], List[TransformStep]]:
+    ) -> Tuple[List[DataIssue], List[TransformStep]]:
         """Check for outliers using IQR method."""
         issues: List[DataIssue] = []
         fixes: List[TransformStep] = []
@@ -247,7 +269,7 @@ class DataPrepAgent:
         self,
         profile: Dict[str, Any],
         schema: List[Dict[str, Any]],
-    ) -> tuple[List[DataIssue], List[TransformStep]]:
+    ) -> Tuple[List[DataIssue], List[TransformStep]]:
         """Check for potential duplicate row issues."""
         issues: List[DataIssue] = []
         fixes: List[TransformStep] = []
@@ -277,7 +299,7 @@ class DataPrepAgent:
         self,
         schema: List[Dict[str, Any]],
         profile: Dict[str, Any],
-    ) -> tuple[List[DataIssue], List[TransformStep]]:
+    ) -> Tuple[List[DataIssue], List[TransformStep]]:
         """Check datetime columns for parsing issues."""
         issues: List[DataIssue] = []
         fixes: List[TransformStep] = []

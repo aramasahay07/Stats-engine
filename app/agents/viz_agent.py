@@ -14,6 +14,12 @@ import uuid
 from .models import ChartSpec, VisualsResult
 from .utils import json_safe
 
+# Import settings for configurable dimensions
+try:
+    from app.config import settings
+except ImportError:
+    settings = None
+
 
 class VizAgent:
     """
@@ -26,13 +32,19 @@ class VizAgent:
     # Vega-Lite schema version
     VEGA_LITE_SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json"
 
-    # Default chart dimensions
-    DEFAULT_WIDTH = 400
-    DEFAULT_HEIGHT = 300
+    # Default chart dimensions (class-level defaults)
+    _DEFAULT_WIDTH = 400
+    _DEFAULT_HEIGHT = 300
 
     def __init__(self):
-        """Initialize the VizAgent."""
-        pass
+        """Initialize the VizAgent with configurable dimensions."""
+        # Use settings if available, otherwise use defaults
+        if settings is not None:
+            self.DEFAULT_WIDTH = getattr(settings, 'analyst_chart_width', self._DEFAULT_WIDTH)
+            self.DEFAULT_HEIGHT = getattr(settings, 'analyst_chart_height', self._DEFAULT_HEIGHT)
+        else:
+            self.DEFAULT_WIDTH = self._DEFAULT_WIDTH
+            self.DEFAULT_HEIGHT = self._DEFAULT_HEIGHT
 
     async def generate(
         self,

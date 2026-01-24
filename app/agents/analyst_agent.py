@@ -10,8 +10,17 @@ The central agent that:
 6) Orchestrates QA validation before returning response
 """
 
+import logging
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+# Type alias for the run_stats function signature
+RunStatsFunc = Callable[
+    [str, str, str, Dict[str, Any]],  # user_id, dataset_id, analysis, params
+    Awaitable[Tuple[Dict[str, Any], bool]]  # (result, cached)
+]
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     AnalystRequest,
@@ -43,7 +52,14 @@ from .utils import (
     format_p_value,
     interpret_p_value,
     interpret_effect_size,
+    normalize_stats_params,
 )
+
+# Import settings for configurable thresholds
+try:
+    from app.config import settings
+except ImportError:
+    settings = None  # Allow running without full app context
 
 
 class AIAnalystAgent:
@@ -57,14 +73,27 @@ class AIAnalystAgent:
     def __init__(
         self,
         openai_api_key: Optional[str] = None,
+        openai_model: Optional[str] = None,
+        alpha_threshold: Optional[float] = None,
     ):
         """
         Initialize the AI Analyst agent.
 
         Args:
             openai_api_key: Optional OpenAI API key for LLM-enhanced explanations
+            openai_model: OpenAI model to use (default from settings or gpt-3.5-turbo)
+            alpha_threshold: Significance threshold (default from settings or 0.05)
         """
         self.openai_api_key = openai_api_key
+
+        # Get configurable values from settings or use defaults
+        if settings is not None:
+            self.openai_model = openai_model or getattr(settings, 'openai_model', 'gpt-3.5-turbo')
+            self.alpha_threshold = alpha_threshold or getattr(settings, 'analyst_alpha_threshold', 0.05)
+        else:
+            self.openai_model = openai_model or 'gpt-3.5-turbo'
+            self.alpha_threshold = alpha_threshold or 0.05
+
         self.dataprep_agent = DataPrepAgent()
         self.transform_agent = TransformAgent()
         self.viz_agent = VizAgent()
@@ -74,7 +103,7 @@ class AIAnalystAgent:
         self,
         request: AnalystRequest,
         dataset_info: DatasetInfo,
-        run_stats_func,
+        run_stats_func: RunStatsFunc,
         data_sample: Optional[List[Dict[str, Any]]] = None,
     ) -> AnalystResponse:
         """
@@ -311,17 +340,20 @@ class AIAnalystAgent:
 
     async def _execute_analysis(
         self,
-        run_stats_func,
+        run_stats_func: RunStatsFunc,
         user_id: str,
         dataset_id: str,
         selection: AnalysisSelection,
     ) -> Tuple[Dict[str, Any], bool]:
         """Execute the statistical analysis."""
+        # Normalize params for compatibility with both concept modules and legacy functions
+        normalized_params = normalize_stats_params(selection.analysis_slug, selection.params)
+
         result, cached = await run_stats_func(
             user_id=user_id,
             dataset_id=dataset_id,
             analysis=selection.analysis_slug,
-            params=selection.params,
+            params=normalized_params,
         )
         return result, cached
 
@@ -410,8 +442,12 @@ class AIAnalystAgent:
                     tone=tone,
                     detail_level=detail_level,
                 )
-            except Exception:
-                pass  # Fall back to templated interpretation
+            except Exception as e:
+                logger.warning(
+                    "LLM interpretation failed, falling back to templates: %s",
+                    str(e),
+                    exc_info=True
+                )
 
         return self._build_templated_interpretation(
             question=question,
@@ -432,13 +468,17 @@ class AIAnalystAgent:
         detail_level: str,
     ) -> Interpretation:
         """Build interpretation using LLM (OpenAI)."""
+        # Import openai with proper error handling
         try:
             import openai
+        except ImportError:
+            logger.error("OpenAI package not installed. Install with: pip install openai")
+            raise ImportError("openai package required for LLM interpretation")
 
-            client = openai.AsyncOpenAI(api_key=self.openai_api_key)
+        client = openai.AsyncOpenAI(api_key=self.openai_api_key)
 
-            # Build prompt
-            prompt = f"""You are a statistical analyst explaining results to a {tone} audience.
+        # Build prompt
+        prompt = f"""You are a statistical analyst explaining results to a {tone} audience.
 The user asked: "{question}"
 
 Analysis performed: {selection.test_name}
@@ -464,8 +504,9 @@ Tone: {tone}
 
 IMPORTANT: Do not compute or invent any numbers. Only use the values provided above."""
 
+        try:
             response = await client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=self.openai_model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=500,
                 temperature=0.3,
@@ -515,7 +556,12 @@ IMPORTANT: Do not compute or invent any numbers. Only use the values provided ab
                 risks_and_caveats=risks or self._get_risks_caveats(selection),
             )
 
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "OpenAI API call failed, falling back to templates: %s",
+                str(e),
+                exc_info=True
+            )
             return self._build_templated_interpretation(
                 question, selection, raw_result, key_numbers, tone, detail_level
             )
@@ -544,19 +590,19 @@ IMPORTANT: Do not compute or invent any numbers. Only use the values provided ab
 
         if slug in ['two-sample-t-test', 'ttest_2samp', 'welch-t-test']:
             sig = interpret_p_value(key_numbers.p_value)
-            if key_numbers.p_value and key_numbers.p_value < 0.05:
+            if key_numbers.p_value and key_numbers.p_value < self.alpha_threshold:
                 return f"The two groups show a statistically significant difference ({sig}). {interpret_effect_size(key_numbers.effect_size, 'cohens_d')}"
             return f"No statistically significant difference was found between the groups ({sig})."
 
         elif slug in ['anova-one-way', 'anova_oneway']:
             sig = interpret_p_value(key_numbers.p_value)
-            if key_numbers.p_value and key_numbers.p_value < 0.05:
+            if key_numbers.p_value and key_numbers.p_value < self.alpha_threshold:
                 return f"At least one group differs significantly from the others ({sig}). Consider post-hoc tests to identify which groups differ."
             return f"No significant differences found among the groups ({sig})."
 
         elif slug in ['chi-square-test', 'chi_square']:
             sig = interpret_p_value(key_numbers.p_value)
-            if key_numbers.p_value and key_numbers.p_value < 0.05:
+            if key_numbers.p_value and key_numbers.p_value < self.alpha_threshold:
                 return f"There is a statistically significant association between the variables ({sig})."
             return f"No significant association found between the variables ({sig})."
 
@@ -603,7 +649,7 @@ IMPORTANT: Do not compute or invent any numbers. Only use the values provided ab
         slug = selection.analysis_slug
 
         if key_numbers.p_value is not None:
-            is_sig = key_numbers.p_value < 0.05
+            is_sig = key_numbers.p_value < self.alpha_threshold
 
             if slug in ['two-sample-t-test', 'ttest_2samp']:
                 if is_sig:
@@ -644,8 +690,8 @@ IMPORTANT: Do not compute or invent any numbers. Only use the values provided ab
         guidance = []
 
         if key_numbers.p_value is not None:
-            if key_numbers.p_value < 0.05:
-                guidance.append("Result is statistically significant at α=0.05. Consider the practical significance alongside statistical significance.")
+            if key_numbers.p_value < self.alpha_threshold:
+                guidance.append(f"Result is statistically significant at α={self.alpha_threshold}. Consider the practical significance alongside statistical significance.")
                 if key_numbers.effect_size is not None:
                     if abs(key_numbers.effect_size) < 0.2:
                         guidance.append("Effect size is small. Even though significant, the practical impact may be minimal.")
@@ -750,7 +796,7 @@ IMPORTANT: Do not compute or invent any numbers. Only use the values provided ab
             steps.append(f"Address {high_severity} high-severity data quality issues before finalizing conclusions")
 
         # Analysis-specific next steps
-        if slug in ['anova-one-way', 'anova_oneway'] and key_numbers.p_value and key_numbers.p_value < 0.05:
+        if slug in ['anova-one-way', 'anova_oneway'] and key_numbers.p_value and key_numbers.p_value < self.alpha_threshold:
             steps.append("Run post-hoc tests (e.g., Tukey HSD) to identify which specific groups differ")
 
         elif slug in ['pearson-correlation', 'correlation']:
@@ -763,7 +809,7 @@ IMPORTANT: Do not compute or invent any numbers. Only use the values provided ab
 
         elif slug in ['two-sample-t-test', 'ttest_2samp']:
             steps.append("Consider effect size for practical significance")
-            if key_numbers.p_value and key_numbers.p_value > 0.05:
+            if key_numbers.p_value and key_numbers.p_value > self.alpha_threshold:
                 steps.append("Power analysis may help determine if sample size was adequate")
 
         # General steps

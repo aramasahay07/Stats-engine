@@ -6,6 +6,7 @@ Provides the /datasets/{dataset_id}/analyst endpoint for AI-assisted statistical
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,6 +21,8 @@ from app.agents import (
     AnalystResponse,
     DatasetInfo,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -128,7 +131,8 @@ async def _get_data_sample(
                     return sample[:limit]
 
         return []
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to fetch data sample for dataset %s: %s", dataset_id, str(e))
         return []
 
 
@@ -232,7 +236,11 @@ async def analyze_dataset(
         raise
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Unexpected error in analyst endpoint for dataset %s: %s", dataset_id, str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "ANALYSIS_ERROR", "message": "An unexpected error occurred during analysis"}
+        )
 
 
 @router.get("/{dataset_id}/analyst/available-tests")
@@ -371,4 +379,8 @@ async def get_available_tests(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Unexpected error in available-tests endpoint for dataset %s: %s", dataset_id, str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "ANALYSIS_ERROR", "message": "An unexpected error occurred"}
+        )
