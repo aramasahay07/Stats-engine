@@ -3,3 +3,9 @@ __pycache__/
 .env
 .venv/
 .DS_Store
+
+# secrets
+env
+.env
+.env.*
+*.env
