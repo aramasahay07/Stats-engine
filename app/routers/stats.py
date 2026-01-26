@@ -95,6 +95,8 @@ async def stats_dataset(dataset_id: str, req: StatsRequest, user_id: str = Query
             dataset_id=dataset_id,
             analysis=req.analysis,
             params=params,
+            where=req.where,
+            pipeline_id=req.pipeline_id,
         )
 
         return StatsResponse(

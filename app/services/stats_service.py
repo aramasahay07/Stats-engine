@@ -1180,7 +1180,9 @@ async def run_stats(
     user_id: str,
     dataset_id: str,
     analysis: str,
-    params: Dict[str, Any]
+    params: Dict[str, Any],
+    where: Optional[str] = None,
+    pipeline_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], bool]:
     """Main routing function for statistical analyses.
 
@@ -1258,6 +1260,9 @@ async def run_stats(
         "parquet_sha": profile.get("parquet_sha"),
         "pipeline_hash": profile.get("pipeline_hash", "__none__"),
         "engine_version": profile.get("engine_version"),
+        # ✅ include opt-in view changes in snapshot identity
+        "where": (where or "").strip() or None,
+        "pipeline_id": pipeline_id,
     }
 
     snapshot_id = hashlib.sha256(
@@ -1294,7 +1299,69 @@ async def run_stats(
             view = eng.register_parquet(con, dataset_id, parquet)
 
             # Concepts typically query FROM dataset
-            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM {view}")
+            # Concepts typically query FROM dataset
+            # We allow opt-in subsetting (where) and opt-in saved pipeline execution (pipeline_id).
+
+            # Base view from parquet
+            con.execute(f"CREATE OR REPLACE VIEW dataset_base AS SELECT * FROM {view}")
+            current_view = "dataset_base"
+
+            # 1) Optional WHERE filtering
+            if where and str(where).strip():
+                con.execute(
+                    f"CREATE OR REPLACE VIEW dataset_filtered AS "
+                    f"SELECT * FROM {current_view} WHERE {where}"
+                )
+                current_view = "dataset_filtered"
+
+            # 2) Optional saved pipeline execution
+            if pipeline_id:
+                from app.engine.pipeline import compile_pipeline_sql
+                from app.transformers.registry import transformer_registry
+
+                rowp = await registry.fetchrow(
+                    """
+                    SELECT steps_json
+                    FROM pipelines
+                    WHERE pipeline_id = $1::uuid
+                      AND user_id = $2
+                      AND dataset_id = $3::uuid
+                    """,
+                    pipeline_id,
+                    user_id,
+                    dataset_id,
+                )
+                if not rowp:
+                    raise ValueError("Pipeline not found (or not owned by user / wrong dataset)")
+
+                steps = rowp["steps_json"]
+                if isinstance(steps, str):
+                    try:
+                        steps = json.loads(steps)
+                    except Exception:
+                        steps = []
+
+                if not isinstance(steps, list):
+                    steps = []
+
+                # Validate ops exist (IMPORTANT: transformer_registry.get raises ValueError)
+                for s in steps:
+                    op = (s or {}).get("op")
+                    if not op:
+                        raise ValueError("Pipeline step missing 'op'")
+
+                    try:
+                        transformer_registry.get(op)  # this raises if op is unknown
+                    except Exception:
+                        raise ValueError(f"Invalid transformer op in pipeline: {op}")
+
+                pipeline_sql = compile_pipeline_sql(base_view=current_view, steps=steps)
+                con.execute(f"CREATE OR REPLACE VIEW dataset_piped AS {pipeline_sql}")
+                current_view = "dataset_piped"
+
+            # Final alias expected by concepts
+            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM {current_view}")
+
 
             ctx = _ConceptCtx(con)
             concept_params = _normalize_concept_params(params)
