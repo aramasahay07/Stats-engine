@@ -4,11 +4,11 @@ from .._base import ConceptMeta, run_concept
 from typing import Any, Dict
 
 META = ConceptMeta(
-    id='ci-coefficients-final',
+    id='ci-from-se-slope-final',
     topic_id='topic-final',
     topic_slug='sampling-estimation',
-    slug='ci-coefficients',
-    title='Ci Coefficients',
+    slug='ci-from-se-slope',
+    title='CI from Standard Error (Slope)',
     concept_type='metric',
     level='intermediate',
     status='published',
