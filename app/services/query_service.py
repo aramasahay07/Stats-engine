@@ -6,6 +6,8 @@ import json
 
 from app.engine.duckdb_engine import DuckDBEngine
 from app.models.query import QuerySpec
+from app.models.pipelines import PipelineStep
+from app.engine.pipeline import ensure_pipeline_view
 from app.db import registry
 from app.config import settings
 
@@ -136,29 +138,88 @@ async def _ensure_parquet_local(user_id: str, dataset_id: str) -> Path:
 
     return p
 
+def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
+    """
+    Convert spec.xTransform into a real transformer pipeline step (date_trunc),
+    then rewrite groupby/select/order_by to use the produced alias column.
+
+    This ensures:
+      - backend does the bucketing
+      - groupby uses the bucketed column name (not raw timestamp)
+      - ordering works automatically
+    """
+    xt = getattr(spec, "x_transform", None)
+    xf = getattr(spec, "x_field", None)
+
+    if not xt:
+        return spec
+
+    # If xField not provided, default to first groupby (common case)
+    if not xf:
+        if spec.groupby:
+            xf = spec.groupby[0]
+        else:
+            raise ValueError("xTransform provided but xField/groupby is missing")
+
+    unit = (xt.type or "").lower().strip()
+    alias = xt.as_name or f"{xf}_{unit}"
+
+    # Add/append date_trunc step
+    step = PipelineStep(op="date_trunc", args={"column": xf, "unit": unit, "as": alias})
+    spec.transforms = list(spec.transforms or []) + [step]
+
+    # Rewrite select/groupby/order_by to use alias if they referenced the raw x field
+    def _rewrite(cols: list[str]) -> list[str]:
+        return [alias if c == xf else c for c in (cols or [])]
+
+    spec.select = _rewrite(spec.select)
+    spec.groupby = _rewrite(spec.groupby)
+
+    if spec.order_by:
+        for o in spec.order_by:
+            if o.col == xf:
+                o.col = alias
+
+    return spec
 
 def build_query_sql(view: str, spec: QuerySpec) -> str:
     select_parts = []
-    for c in spec.select:
-        select_parts.append(_quote_ident(c))
-    for m in spec.measures:
+    selected_cols = set()
+
+    # 1️⃣ Always include GROUP BY dimensions in SELECT (chart-safe)
+    for c in (spec.groupby or []):
+        if c not in selected_cols:
+            select_parts.append(_quote_ident(c))
+            selected_cols.add(c)
+
+    # 2️⃣ Include explicitly requested SELECT columns (avoid duplicates)
+    for c in (spec.select or []):
+        if c not in selected_cols:
+            select_parts.append(_quote_ident(c))
+            selected_cols.add(c)
+
+    # 3️⃣ Measures
+    for m in (spec.measures or []):
         select_parts.append(f"({m.expr}) AS {_quote_ident(m.name)}")
+
     if not select_parts:
         select_parts = ["*"]
 
     sql = f"SELECT {', '.join(select_parts)} FROM {view}"
 
+    # 4️⃣ WHERE filters
     if spec.filters:
         clauses = []
         for f in spec.filters:
             op = (f.op or "").strip().upper()
             if op not in ALLOWED_FILTER_OPS:
                 raise ValueError(f"Unsupported filter operator: {f.op}")
+
             col = _quote_ident(f.col)
 
             if op in ("IN", "NOT IN"):
-                if not isinstance(f.value, (list, tuple)) or len(f.value) == 0:
-                    raise ValueError("IN/NOT IN requires a non-empty list")
+                if not isinstance(f.value, (list, tuple)) or not f.value:
+                    raise ValueError("IN / NOT IN requires a non-empty list")
                 vals = []
                 for v in f.value:
                     if isinstance(v, (int, float)):
@@ -192,16 +253,24 @@ def build_query_sql(view: str, spec: QuerySpec) -> str:
 
         sql += " WHERE " + " AND ".join(clauses)
 
+    # 5️⃣ GROUP BY (must match SELECT dimensions exactly)
     if spec.groupby:
-        gb = ", ".join([_quote_ident(c) for c in spec.groupby])
+        gb = ", ".join(_quote_ident(c) for c in spec.groupby)
         sql += f" GROUP BY {gb}"
 
+    # 6️⃣ ORDER BY (expects columns already rewritten by xTransform shortcut)
     if spec.order_by:
-        ob = ", ".join([f"{_quote_ident(o.col)} {o.dir.upper()}" for o in spec.order_by])
+        ob = ", ".join(
+            f"{_quote_ident(o.col)} {o.dir.upper()}"
+            for o in spec.order_by
+        )
         sql += f" ORDER BY {ob}"
 
+    # 7️⃣ LIMIT (safety-clamped earlier)
     sql += f" LIMIT {int(spec.limit)}"
+
     return sql
+
 
 
 async def run_query(user_id: str, dataset_id: str, spec: QuerySpec) -> Dict[str, Any]:
@@ -214,23 +283,39 @@ async def run_query(user_id: str, dataset_id: str, spec: QuerySpec) -> Dict[str,
         spec.limit = max_rows
 
     parquet_local = await _ensure_parquet_local(user_id, dataset_id)
+
     eng = DuckDBEngine(user_id)
     con = eng.connect()
-    view = eng.register_parquet(con, dataset_id, parquet_local)
+    try:
+        # 1) Register parquet as a DuckDB view
+        view = eng.register_parquet(con, dataset_id, parquet_local)
 
-    # ✅ Prevent AVG(text) by normalizing measures/dimensions using DuckDB column types
-    coltypes = _duckdb_col_types(con, view)
-    spec = normalize_query_spec(spec, coltypes)
+        # 2) Expand xTransform shortcut into real transformer step + rewrite groupby/select/order_by
+        spec = _apply_xtransform_shortcut(spec)
 
-    sql = build_query_sql(view, spec)
-    df = con.execute(sql).fetchdf()
-    con.close()
+        # 3) If transforms exist (explicit or created by xTransform), compile pipeline view
+        if spec.transforms:
+            # NOTE: if your ensure_pipeline_view signature differs, adjust here
+            view = ensure_pipeline_view(con, dataset_id, view, spec.transforms)
 
-    return {
-        "columns": list(df.columns),
-        "data": json.loads(df.to_json(orient="records", date_format="iso")),
-        "row_count": len(df),
-    }
+        # 4) Inspect types AFTER transforms
+        coltypes = _duckdb_col_types(con, view)
+
+        # 5) Normalize spec (avoid AVG(text), etc.)
+        spec = normalize_query_spec(spec, coltypes)
+
+        # 6) Build & execute query
+        sql = build_query_sql(view, spec)
+        df = con.execute(sql).fetchdf()
+
+        return {
+            "columns": list(df.columns),
+            "data": json.loads(df.to_json(orient="records", date_format="iso")),
+            "row_count": len(df),
+        }
+
+    finally:
+        con.close()
 
 
 async def export_query(user_id: str, dataset_id: str, spec: QuerySpec, fmt: str = "parquet") -> Dict[str, Any]:
