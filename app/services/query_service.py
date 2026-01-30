@@ -139,22 +139,13 @@ async def _ensure_parquet_local(user_id: str, dataset_id: str) -> Path:
     return p
 
 def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
-    """
-    Convert spec.xTransform into a real transformer pipeline step (date_trunc),
-    then rewrite groupby/select/order_by to use the produced alias column.
-
-    This ensures:
-      - backend does the bucketing
-      - groupby uses the bucketed column name (not raw timestamp)
-      - ordering works automatically
-    """
     xt = getattr(spec, "x_transform", None)
     xf = getattr(spec, "x_field", None)
 
     if not xt:
         return spec
 
-    # If xField not provided, default to first groupby (common case)
+    # default xField to first groupby if missing
     if not xf:
         if spec.groupby:
             xf = spec.groupby[0]
@@ -162,15 +153,118 @@ def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
             raise ValueError("xTransform provided but xField/groupby is missing")
 
     unit = (xt.type or "").lower().strip()
-    alias = xt.as_name or f"{xf}_{unit}"
+    fmt = (getattr(xt, "format", None) or "").lower().strip()
 
-    # Add/append date_trunc step
-    step = PipelineStep(op="date_trunc", args={"column": xf, "unit": unit, "as": alias})
-    spec.transforms = list(spec.transforms or []) + [step]
+    base = xt.as_name or f"{xf}_{unit}"
+    key_col = base
 
-    # Rewrite select/groupby/order_by to use alias if they referenced the raw x field
+    # Label columns (only created when requested)
+    name_col = f"{base}_name"
+    name_year_col = f"{base}_name_year"
+    iso_col = f"{base}_iso"
+
+    # decide which labels to generate
+    want_all = (fmt == "all")
+    want_name = want_all or (fmt == "name")
+    want_name_year = want_all or (fmt == "name_year")
+    want_iso = want_all or (fmt == "iso")
+
+    steps = list(spec.transforms or [])
+
+    # --- 1) KEY (used for groupby + sorting) ---
+    if unit in ("weekday", "weekday_weekend"):
+        # stable numeric key: day-of-week number (DuckDB: 0=Sunday .. 6=Saturday)
+        steps.append(PipelineStep(op="date_part", args={"column": xf, "part": "dow", "as": key_col}))
+    else:
+        # date bucket key: timestamp truncated
+        steps.append(PipelineStep(op="date_trunc", args={"column": xf, "unit": unit, "as": key_col}))
+
+    # --- 2) LABELS (display only) ---
+    if want_name or want_name_year or want_iso:
+        if unit == "month":
+            # labels based on KEY (month-start timestamp)
+            if want_name:
+                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%B", "as": name_col}))
+            if want_name_year:
+                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %Y", "as": name_year_col}))
+            if want_iso:
+                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m", "as": iso_col}))
+
+        elif unit == "hour":
+            # key is hour-trunc timestamp; labels from KEY are fine
+            if want_name:
+                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%I %p", "as": name_col}))  # "01 PM"
+            if want_name_year:
+                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %d %Y %I %p", "as": name_year_col}))
+            if want_iso:
+                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m-%d %H:00", "as": iso_col}))
+
+        elif unit in ("day", "week", "quarter", "year"):
+            # general labels based on KEY
+            if want_name:
+                # day/week/quarter/year "name" is subjective; keep it readable
+                if unit == "day":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %d", "as": name_col}))
+                elif unit == "week":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Wk of %b %d", "as": name_col}))
+                elif unit == "quarter":
+                    # if you have no quarter formatter, use ISO-like
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Q%q %Y", "as": name_col}))
+                elif unit == "year":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y", "as": name_col}))
+
+            if want_name_year:
+                # usually same as name for these
+                if unit == "day":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %d %Y", "as": name_year_col}))
+                elif unit == "week":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Wk of %b %d %Y", "as": name_year_col}))
+                elif unit == "quarter":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Q%q %Y", "as": name_year_col}))
+                elif unit == "year":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y", "as": name_year_col}))
+
+            if want_iso:
+                if unit == "day":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m-%d", "as": iso_col}))
+                elif unit == "week":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m-%d", "as": iso_col}))
+                elif unit == "quarter":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-Q%q", "as": iso_col}))
+                elif unit == "year":
+                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y", "as": iso_col}))
+
+        elif unit == "weekday":
+            # weekday labels from original timestamp
+            if want_name:
+                steps.append(PipelineStep(op="strftime", args={"column": xf, "format": "%A", "as": name_col}))
+            if want_name_year:
+                steps.append(PipelineStep(op="strftime", args={"column": xf, "format": "%a", "as": name_year_col}))
+            if want_iso:
+                # iso = numeric dow
+                steps.append(PipelineStep(op="cast", args={"column": key_col, "type": "VARCHAR", "as": iso_col}))
+
+        elif unit == "weekday_weekend":
+            # label: Weekend/Weekday based on numeric key (dow)
+            if want_name or want_name_year or want_iso:
+                steps.append(PipelineStep(op="case", args={
+                    "cases": [
+                        {"when": f"{_quote_ident(key_col)} IN (0, 6)", "then": "Weekend"},
+                    ],
+                    "else": "Weekday",
+                    "as": name_col,
+                }))
+                if want_name_year:
+                    steps.append(PipelineStep(op="copy", args={"column": name_col, "as": name_year_col}))
+                if want_iso:
+                    steps.append(PipelineStep(op="copy", args={"column": name_col, "as": iso_col}))
+
+    # apply steps
+    spec.transforms = steps
+
+    # Rewrite groupby/select/order_by to use KEY (stable sort/group)
     def _rewrite(cols: list[str]) -> list[str]:
-        return [alias if c == xf else c for c in (cols or [])]
+        return [key_col if c == xf else c for c in (cols or [])]
 
     spec.select = _rewrite(spec.select)
     spec.groupby = _rewrite(spec.groupby)
@@ -178,9 +272,28 @@ def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
     if spec.order_by:
         for o in spec.order_by:
             if o.col == xf:
-                o.col = alias
+                o.col = key_col
+
+    # Ensure label columns are returned when requested (even if frontend didn’t ask)
+    if fmt in ("all", "name", "name_year", "iso"):
+        to_add = []
+        if want_name:
+            to_add.append(name_col)
+        if want_name_year:
+            to_add.append(name_year_col)
+        if want_iso:
+            to_add.append(iso_col)
+
+        # Add labels to SELECT output (do not group by labels)
+        existing = set(spec.select or [])
+        spec.select = list(spec.select or [])
+        for c in to_add:
+            if c not in existing and c not in (spec.groupby or []):
+                spec.select.append(c)
+                existing.add(c)
 
     return spec
+
 
 def build_query_sql(view: str, spec: QuerySpec) -> str:
     select_parts = []
