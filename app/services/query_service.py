@@ -139,31 +139,52 @@ async def _ensure_parquet_local(user_id: str, dataset_id: str) -> Path:
     return p
 
 def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
+    """
+    Expand QuerySpec.xTransform into concrete transformer PipelineSteps.
+
+    Long-term contract:
+    - Always create a stable KEY column for grouping & sorting.
+    - Optionally create LABEL columns for display:
+        <base>_name, <base>_name_year, <base>_iso
+      controlled by xTransform.format in {"name","name_year","iso","all"}.
+
+    Uses existing transformer ops (NO missing-op errors):
+      - date_trunc
+      - date_part
+      - format_datetime
+      - add_conditional_column
+      - duplicate_column
+      - add_constant_column
+      - text_merge
+
+    Also rewrites select/groupby/order_by to use the KEY column so the backend
+    actually groups/sorts by the bucketed field (not the raw timestamp).
+    """
     xt = getattr(spec, "x_transform", None)
     xf = getattr(spec, "x_field", None)
 
     if not xt:
         return spec
 
-    # default xField to first groupby if missing
+    # Default xField to the first groupby if missing (common router pattern)
     if not xf:
         if spec.groupby:
             xf = spec.groupby[0]
         else:
             raise ValueError("xTransform provided but xField/groupby is missing")
 
-    unit = (xt.type or "").lower().strip()
+    unit = (getattr(xt, "type", None) or "").lower().strip()
     fmt = (getattr(xt, "format", None) or "").lower().strip()
 
-    base = xt.as_name or f"{xf}_{unit}"
+    # Base output name: either explicit "as" or <xField>_<unit>
+    base = getattr(xt, "as_name", None) or f"{xf}_{unit}"
     key_col = base
 
-    # Label columns (only created when requested)
+    # Label columns
     name_col = f"{base}_name"
     name_year_col = f"{base}_name_year"
     iso_col = f"{base}_iso"
 
-    # decide which labels to generate
     want_all = (fmt == "all")
     want_name = want_all or (fmt == "name")
     want_name_year = want_all or (fmt == "name_year")
@@ -171,98 +192,111 @@ def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
 
     steps = list(spec.transforms or [])
 
-    # --- 1) KEY (used for groupby + sorting) ---
+    # ---------------------------------------------------------------------
+    # 1) KEY column (stable grouping/sorting)
+    # ---------------------------------------------------------------------
     if unit in ("weekday", "weekday_weekend"):
-        # stable numeric key: day-of-week number (DuckDB: 0=Sunday .. 6=Saturday)
+        # DuckDB: EXTRACT(dow FROM ts) -> 0=Sunday .. 6=Saturday
         steps.append(PipelineStep(op="date_part", args={"column": xf, "part": "dow", "as": key_col}))
     else:
-        # date bucket key: timestamp truncated
+        # Default: time bucketing
         steps.append(PipelineStep(op="date_trunc", args={"column": xf, "unit": unit, "as": key_col}))
 
-    # --- 2) LABELS (display only) ---
+    # ---------------------------------------------------------------------
+    # 2) LABEL columns (optional)
+    # ---------------------------------------------------------------------
     if want_name or want_name_year or want_iso:
         if unit == "month":
-            # labels based on KEY (month-start timestamp)
             if want_name:
-                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%B", "as": name_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%B", "as": name_col}))
             if want_name_year:
-                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %Y", "as": name_year_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%b %Y", "as": name_year_col}))
             if want_iso:
-                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m", "as": iso_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%Y-%m", "as": iso_col}))
 
         elif unit == "hour":
-            # key is hour-trunc timestamp; labels from KEY are fine
             if want_name:
-                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%I %p", "as": name_col}))  # "01 PM"
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%I %p", "as": name_col}))  # "01 PM"
             if want_name_year:
-                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %d %Y %I %p", "as": name_year_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%b %d %Y %I %p", "as": name_year_col}))
             if want_iso:
-                steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m-%d %H:00", "as": iso_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%Y-%m-%d %H:00", "as": iso_col}))
 
-        elif unit in ("day", "week", "quarter", "year"):
-            # general labels based on KEY
+        elif unit == "day":
             if want_name:
-                # day/week/quarter/year "name" is subjective; keep it readable
-                if unit == "day":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %d", "as": name_col}))
-                elif unit == "week":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Wk of %b %d", "as": name_col}))
-                elif unit == "quarter":
-                    # if you have no quarter formatter, use ISO-like
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Q%q %Y", "as": name_col}))
-                elif unit == "year":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y", "as": name_col}))
-
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%b %d", "as": name_col}))
             if want_name_year:
-                # usually same as name for these
-                if unit == "day":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%b %d %Y", "as": name_year_col}))
-                elif unit == "week":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Wk of %b %d %Y", "as": name_year_col}))
-                elif unit == "quarter":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "Q%q %Y", "as": name_year_col}))
-                elif unit == "year":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y", "as": name_year_col}))
-
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%b %d %Y", "as": name_year_col}))
             if want_iso:
-                if unit == "day":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m-%d", "as": iso_col}))
-                elif unit == "week":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-%m-%d", "as": iso_col}))
-                elif unit == "quarter":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y-Q%q", "as": iso_col}))
-                elif unit == "year":
-                    steps.append(PipelineStep(op="strftime", args={"column": key_col, "format": "%Y", "as": iso_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%Y-%m-%d", "as": iso_col}))
+
+        elif unit == "week":
+            if want_name:
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "Wk of %b %d", "as": name_col}))
+            if want_name_year:
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "Wk of %b %d %Y", "as": name_year_col}))
+            if want_iso:
+                steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%Y-%m-%d", "as": iso_col}))
+
+        elif unit == "year":
+            # Year is straightforward; reuse via duplicate_column when possible
+            steps.append(PipelineStep(op="format_datetime", args={"column": key_col, "format": "%Y", "as": name_col}))
+            if want_name_year:
+                steps.append(PipelineStep(op="duplicate_column", args={"source": name_col, "name": name_year_col}))
+            if want_iso:
+                steps.append(PipelineStep(op="duplicate_column", args={"source": name_col, "name": iso_col}))
+
+        elif unit == "quarter":
+            # Avoid relying on %q (not always supported); build labels from date parts.
+            y_tmp = f"{base}__year"
+            q_tmp = f"{base}__quarter"
+            q_lbl = f"{base}__q_lbl"
+            q_const = f"{base}__Q"
+
+            steps.append(PipelineStep(op="date_part", args={"column": key_col, "part": "year", "as": y_tmp}))
+            steps.append(PipelineStep(op="date_part", args={"column": key_col, "part": "quarter", "as": q_tmp}))
+
+            steps.append(PipelineStep(op="add_constant_column", args={"name": q_const, "value": "Q"}))
+            steps.append(PipelineStep(op="text_merge", args={"columns_in": [q_const, q_tmp], "sep": "", "name": q_lbl}))
+
+            if want_name:
+                steps.append(PipelineStep(op="duplicate_column", args={"source": q_lbl, "name": name_col}))
+            if want_name_year:
+                steps.append(PipelineStep(op="text_merge", args={"columns_in": [q_lbl, y_tmp], "sep": " ", "name": name_year_col}))
+            if want_iso:
+                steps.append(PipelineStep(op="text_merge", args={"columns_in": [y_tmp, q_tmp], "sep": "-Q", "name": iso_col}))
 
         elif unit == "weekday":
-            # weekday labels from original timestamp
+            # KEY is numeric DOW; label from original timestamp for correct locale names
             if want_name:
-                steps.append(PipelineStep(op="strftime", args={"column": xf, "format": "%A", "as": name_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": xf, "format": "%A", "as": name_col}))
             if want_name_year:
-                steps.append(PipelineStep(op="strftime", args={"column": xf, "format": "%a", "as": name_year_col}))
+                steps.append(PipelineStep(op="format_datetime", args={"column": xf, "format": "%a", "as": name_year_col}))
             if want_iso:
-                # iso = numeric dow
-                steps.append(PipelineStep(op="cast", args={"column": key_col, "type": "VARCHAR", "as": iso_col}))
+                steps.append(PipelineStep(op="duplicate_column", args={"source": key_col, "name": iso_col}))
 
         elif unit == "weekday_weekend":
-            # label: Weekend/Weekday based on numeric key (dow)
-            if want_name or want_name_year or want_iso:
-                steps.append(PipelineStep(op="case", args={
-                    "cases": [
-                        {"when": f"{_quote_ident(key_col)} IN (0, 6)", "then": "Weekend"},
-                    ],
-                    "else": "Weekday",
-                    "as": name_col,
-                }))
-                if want_name_year:
-                    steps.append(PipelineStep(op="copy", args={"column": name_col, "as": name_year_col}))
-                if want_iso:
-                    steps.append(PipelineStep(op="copy", args={"column": name_col, "as": iso_col}))
+            # Weekend vs Weekday derived from numeric DOW (0,6)
+            steps.append(PipelineStep(op="add_conditional_column", args={
+                "name": name_col,
+                "conditions": [
+                    {"when": f"{_quote_ident(key_col)} IN (0, 6)", "then": "Weekend"},
+                ],
+                "else": "Weekday",
+            }))
+            if want_name_year:
+                steps.append(PipelineStep(op="duplicate_column", args={"source": name_col, "name": name_year_col}))
+            if want_iso:
+                steps.append(PipelineStep(op="duplicate_column", args={"source": name_col, "name": iso_col}))
 
-    # apply steps
+        # If unit is unknown, we still keep KEY (date_trunc) and skip labels safely.
+
+    # Apply steps
     spec.transforms = steps
 
-    # Rewrite groupby/select/order_by to use KEY (stable sort/group)
+    # ---------------------------------------------------------------------
+    # 3) Rewrite select/groupby/order_by to use KEY (stable grouping)
+    # ---------------------------------------------------------------------
     def _rewrite(cols: list[str]) -> list[str]:
         return [key_col if c == xf else c for c in (cols or [])]
 
@@ -274,7 +308,7 @@ def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
             if o.col == xf:
                 o.col = key_col
 
-    # Ensure label columns are returned when requested (even if frontend didn’t ask)
+    # Ensure labels are returned when requested (but not grouped)
     if fmt in ("all", "name", "name_year", "iso"):
         to_add = []
         if want_name:
@@ -284,7 +318,6 @@ def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
         if want_iso:
             to_add.append(iso_col)
 
-        # Add labels to SELECT output (do not group by labels)
         existing = set(spec.select or [])
         spec.select = list(spec.select or [])
         for c in to_add:
@@ -293,6 +326,7 @@ def _apply_xtransform_shortcut(spec: QuerySpec) -> QuerySpec:
                 existing.add(c)
 
     return spec
+
 
 
 def build_query_sql(view: str, spec: QuerySpec) -> str:
@@ -441,31 +475,42 @@ async def export_query(user_id: str, dataset_id: str, spec: QuerySpec, fmt: str 
         raise ValueError("fmt must be parquet or csv")
 
     parquet_local = await _ensure_parquet_local(user_id, dataset_id)
+
     eng = DuckDBEngine(user_id)
     con = eng.connect()
-    view = eng.register_parquet(con, dataset_id, parquet_local)
+    try:
+        view = eng.register_parquet(con, dataset_id, parquet_local)
 
-    # ✅ Same normalization for exports (avoid AVG(text) failures)
-    coltypes = _duckdb_col_types(con, view)
-    spec = normalize_query_spec(spec, coltypes)
+        # ✅ Expand xTransform shortcut into real transformer step + rewrite select/groupby/order_by
+        spec = _apply_xtransform_shortcut(spec)
 
-    sql = build_query_sql(view, spec)
+        # ✅ Apply pipeline transforms (including labels via format_datetime/add_conditional_column/etc.)
+        if spec.transforms:
+            view = ensure_pipeline_view(con, dataset_id, view, spec.transforms)
 
-    export_dir = Path(settings.data_dir) / "exports" / user_id / dataset_id
-    export_dir.mkdir(parents=True, exist_ok=True)
-    ts = __import__("datetime").datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    local_out = export_dir / f"query_{ts}.{fmt}"
+        # ✅ Normalize AFTER transforms (types may change)
+        coltypes = _duckdb_col_types(con, view)
+        spec = normalize_query_spec(spec, coltypes)
 
-    if fmt == "parquet":
-        con.execute(f"COPY ({sql}) TO '{local_out.as_posix()}' (FORMAT PARQUET)")
-        content_type = "application/octet-stream"
-    else:
-        con.execute(f"COPY ({sql}) TO '{local_out.as_posix()}' (HEADER, DELIMITER ',')")
-        content_type = "text/csv"
+        sql = build_query_sql(view, spec)
 
-    # row count (cheap)
-    row_count = con.execute(f"SELECT COUNT(*) AS c FROM ({sql}) t").fetchone()[0]
-    con.close()
+        export_dir = Path(settings.data_dir) / "exports" / user_id / dataset_id
+        export_dir.mkdir(parents=True, exist_ok=True)
+        ts = __import__("datetime").datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        local_out = export_dir / f"query_{ts}.{fmt}"
+
+        if fmt == "parquet":
+            con.execute(f"COPY ({sql}) TO '{local_out.as_posix()}' (FORMAT PARQUET)")
+            content_type = "application/octet-stream"
+        else:
+            con.execute(f"COPY ({sql}) TO '{local_out.as_posix()}' (HEADER, DELIMITER ',')")
+            content_type = "text/csv"
+
+        # row count
+        row_count = con.execute(f"SELECT COUNT(*) AS c FROM ({sql}) t").fetchone()[0]
+
+    finally:
+        con.close()
 
     from app.services.storage_supabase import SupabaseStorage
     storage = SupabaseStorage()
@@ -473,6 +518,7 @@ async def export_query(user_id: str, dataset_id: str, spec: QuerySpec, fmt: str 
     await storage.upload_file(local_out, remote_path, content_type)
 
     return {"remote_path": remote_path, "row_count": int(row_count), "format": fmt}
+
 
 
 async def run_query_operation(user_id: str, dataset_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
