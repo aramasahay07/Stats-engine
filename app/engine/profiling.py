@@ -29,6 +29,51 @@ def infer_role(dtype: str) -> str:
         return "datetime"
 
     return "categorical"
+# -----------------------------------------------------------------------------
+# Data quality issue detection
+# -----------------------------------------------------------------------------
+def detect_issues_from_schema(schema: list[dict]) -> list[dict]:
+    """
+    Detect data formatting / type issues based on DuckDB schema.
+    This is NON-DESTRUCTIVE and advisory only.
+    """
+    issues: list[dict] = []
+
+    for col in schema:
+        name = col["name"]
+        dtype = col["dtype"].lower()
+        role = col["role"]
+
+        # 1. Unsupported / risky time types
+        if "time with time zone" in dtype:
+            issues.append({
+                "column": name,
+                "issue_type": "unsupported_type",
+                "severity": "blocking",
+                "details": {
+                    "duckdb_type": col["dtype"]
+                },
+                "suggested_fix": {
+                    "op": "change_type",
+                    "to": "varchar"
+                }
+            })
+
+        # 2. Dates stored as text
+        elif role == "categorical" and any(k in dtype for k in ["varchar", "string"]):
+            issues.append({
+                "column": name,
+                "issue_type": "date_or_numeric_as_text",
+                "severity": "recommended",
+                "details": {
+                    "duckdb_type": col["dtype"]
+                },
+                "suggested_fix": {
+                    "op": "infer_and_cast"
+                }
+            })
+
+    return issues
 
 
 # -----------------------------------------------------------------------------
@@ -71,6 +116,10 @@ def build_profile_from_duckdb(
         )
         if role == "numeric":
             numeric_columns.append(name)
+    # =========================================================================
+    # STEP 1B: Detect data quality issues (schema-based)
+    # =========================================================================
+    issues = detect_issues_from_schema(schema)
 
     # =========================================================================
     # STEP 2: Dataset dimensions
@@ -161,6 +210,7 @@ def build_profile_from_duckdb(
         "n_rows": n_rows,
         "n_cols": n_cols,
         "schema": schema,
+        "issues": issues,
         "numeric_summary": numeric_summary,
         "sample_rows": sample_rows,
     }
