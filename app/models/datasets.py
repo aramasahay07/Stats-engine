@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+from app.models.pipelines import PipelineStep
+
 
 
 class ColumnProfile(BaseModel):
@@ -50,3 +52,14 @@ class DatasetMetadataResponse(BaseModel):
     # convenience fields (not always used by all endpoints/clients)
     ready: Optional[bool] = None
     error_message: Optional[str] = None
+
+    
+class DatasetTransformRequest(BaseModel):
+    transforms: List[PipelineStep] = Field(default_factory=list)
+    
+
+class DatasetTransformResponse(BaseModel):
+    dataset_id: str
+    version: int
+    parquet_ref: str
+    profile: Dict[str, Any]

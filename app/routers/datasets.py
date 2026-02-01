@@ -15,7 +15,14 @@ from fastapi import (
 )
 
 from app.db import registry
-from app.models.datasets import DatasetCreateResponse, DatasetMetadataResponse, DatasetProfile
+from app.models.datasets import (
+    DatasetCreateResponse,
+    DatasetMetadataResponse,
+    DatasetProfile,
+    DatasetTransformRequest,
+    DatasetTransformResponse,
+)
+
 from app.services import jobs_service
 from app.services.datasets_service import dataset_service
 
@@ -180,3 +187,20 @@ async def get_dataset(dataset_id: str, user_id: str = Query(...)):
         "schema_json": schema_obj,
         "profile_json": profile_obj,
     }
+@router.post("/{dataset_id}/transform", response_model=DatasetTransformResponse)
+async def transform_dataset(dataset_id: str, req: DatasetTransformRequest, user_id: str = Query(...)):
+    # Basic validation
+    if not req.transforms:
+        raise HTTPException(status_code=400, detail="transforms cannot be empty")
+
+    try:
+        result = await dataset_service.apply_transforms_and_version(
+            user_id=user_id,
+            dataset_id=dataset_id,
+            transforms=req.transforms,
+        )
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}")

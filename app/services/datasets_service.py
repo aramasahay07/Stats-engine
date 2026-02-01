@@ -15,6 +15,8 @@ from app.engine.ingest import csv_to_parquet_streaming, xlsx_to_parquet, parquet
 from app.engine.duckdb_engine import DuckDBEngine
 from app.engine.profiling import build_profile_from_duckdb
 from app.db import registry
+from app.engine.pipeline import ensure_pipeline_view, pipeline_hash
+from app.models.pipelines import PipelineStep
 
 
 # -----------------------------------------------------------------------------
@@ -54,6 +56,24 @@ class DatasetService:
     def _local_dir(self, user_id: str, dataset_id: str) -> Path:
         p = Path(settings.data_dir) / "datasets" / user_id / dataset_id
         p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    async def _ensure_parquet_local(self, user_id: str, dataset_id: str) -> Path:
+        p = Path(settings.data_dir) / "datasets" / user_id / dataset_id / "data.parquet"
+        if p.exists():
+            return p
+
+        row = await registry.fetchrow(
+            "SELECT parquet_ref FROM datasets WHERE dataset_id = $1::uuid AND user_id=$2",
+            dataset_id,
+            user_id,
+        )
+        if not row or not row.get("parquet_ref"):
+            raise FileNotFoundError("Parquet artifact not found (dataset still building or missing parquet_ref).")
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+        file_bytes = await self.storage.download(row["parquet_ref"])
+        p.write_bytes(file_bytes)
         return p
 
     # -------------------------------------------------------------------------
@@ -247,8 +267,121 @@ class DatasetService:
                 pass
 
             raise
- 
+    async def apply_transforms_and_version(
+        self,
+        user_id: str,
+        dataset_id: str,
+        transforms: list[PipelineStep],
+    ) -> Dict[str, Any]:
+        # 1) Read current dataset info + ownership
+        row = await registry.fetchrow(
+            """
+            SELECT dataset_id, user_id, parquet_ref, version, state
+            FROM datasets
+            WHERE dataset_id = $1::uuid AND user_id::text = $2
+            """,
+            dataset_id,
+            user_id,
+        )
+        if not row:
+            raise FileNotFoundError("Dataset not found")
+        if (row.get("state") or "ready") != "ready":
+            raise ValueError("Dataset is not ready yet")
+
+        current_version = int(row.get("version") or 1)
+        new_version = current_version + 1
+
+        # 2) Mark dataset as processing
+        await registry.execute(
+            """
+            UPDATE datasets
+            SET state = 'processing',
+                updated_at = NOW()
+            WHERE dataset_id = $1::uuid
+            """,
+            dataset_id,
+        )
+
+        # 3) Ensure parquet exists locally
+        parquet_local = await self._ensure_parquet_local(user_id, dataset_id)
+
+        # 4) Run transforms in DuckDB and materialize to a NEW parquet
+        local_dir = self._local_dir(user_id, dataset_id)
+        out_local = local_dir / f"data_v{new_version}.parquet"
+
+        eng = DuckDBEngine(user_id)
+        con = eng.connect()
+        try:
+            base_view = eng.register_parquet(con, dataset_id, parquet_local)
+
+            # Apply transforms as a pipeline view
+            piped_view = ensure_pipeline_view(con, dataset_id, base_view, transforms)
+
+            # Materialize full dataset
+            con.execute(f"COPY (SELECT * FROM {piped_view}) TO '{out_local.as_posix()}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+
+        # 5) Upload new parquet to a versioned storage location
+        base = f"{user_id}/datasets/{dataset_id}"
+        new_parquet_ref = f"{base}/parquet/v{new_version}/data.parquet"
+
+        await self.storage.upload_file(out_local, new_parquet_ref, "application/octet-stream")
+
+        # 6) Re-profile the new parquet
+        eng = DuckDBEngine(user_id)
+        con = eng.connect()
+        try:
+            base_view = eng.register_parquet(con, dataset_id, out_local)
+            profile = build_profile_from_duckdb(con, base_view)
+        finally:
+            con.close()
+
+        # 7) Snapshot metadata updates
+        parquet_sha = fingerprint_file(out_local)
+        ph = pipeline_hash(transforms)
+
+        profile["parquet_ref"] = new_parquet_ref
+        profile["parquet_sha"] = parquet_sha
+        profile["pipeline_hash"] = ph
+        profile["engine_version"] = ENGINE_VERSION
+        profile.setdefault("numeric_summary", {})
+
+        schema_payload = json.dumps(profile.get("schema") or [])
+        profile_payload = json.dumps(profile)
+
+        # 8) Persist updated dataset state + bump version
+        await registry.execute(
+            """
+            UPDATE datasets
+            SET parquet_ref = $2,
+                n_rows = $3,
+                n_cols = $4,
+                schema_json = $5::jsonb,
+                profile_json = $6::jsonb,
+                version = $7,
+                state = 'ready',
+                error_message = NULL,
+                updated_at = NOW()
+            WHERE dataset_id = $1::uuid
+            """,
+            dataset_id,
+            new_parquet_ref,
+            int(profile.get("n_rows") or 0),
+            int(profile.get("n_cols") or 0),
+            schema_payload,
+            profile_payload,
+            new_version,
+        )
+
+        return {
+            "dataset_id": dataset_id,
+            "version": new_version,
+            "parquet_ref": new_parquet_ref,
+            "profile": profile,
+        }
 
 
 # Singleton
 dataset_service = DatasetService()
+   
