@@ -193,8 +193,12 @@ class DatasetService:
             eng = DuckDBEngine(user_id)
             con = eng.connect()
             try:
-                base_view = eng.register_parquet(con, dataset_id, parquet_local)
+                base_view, detected_issues = eng.register_parquet_with_issues(con, dataset_id, parquet_local)
                 profile = build_profile_from_duckdb(con, base_view)
+
+                profile.setdefault("issues", [])
+                profile["issues"].extend(detected_issues)
+
             finally:
                 con.close()
 
@@ -373,6 +377,7 @@ class DatasetService:
         try:
             base_view = eng.register_parquet(con, dataset_id, parquet_local)
 
+
             # Apply transforms as a pipeline view
             piped_view = ensure_pipeline_view(con, dataset_id, base_view, transforms)
 
@@ -391,8 +396,12 @@ class DatasetService:
         eng = DuckDBEngine(user_id)
         con = eng.connect()
         try:
-            base_view = eng.register_parquet(con, dataset_id, out_local)
+            base_view, detected_issues = eng.register_parquet_with_issues(con, dataset_id, out_local)
             profile = build_profile_from_duckdb(con, base_view)
+
+            profile.setdefault("issues", [])
+            profile["issues"].extend(detected_issues)
+
         finally:
             con.close()
 
