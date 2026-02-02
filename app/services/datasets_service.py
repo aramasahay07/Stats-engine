@@ -148,223 +148,262 @@ class DatasetService:
         return local_raw, raw_ref
 
     # -------------------------------------------------------------------------
-    # Build parquet, profile, and persist snapshot metadata
-    # -------------------------------------------------------------------------
-    async def build_parquet_and_profile(
-        self,
-        user_id: str,
-        dataset_id: str,
-        raw_local: Path,
-        raw_ref: str,
-        job_id: str,
-    ) -> Dict[str, Any]:
+# Build parquet, profile, and persist snapshot metadata
+# -------------------------------------------------------------------------
+async def build_parquet_and_profile(
+    self,
+    user_id: str,
+    dataset_id: str,
+    raw_local: Path,
+    raw_ref: str,
+    job_id: str,
+) -> Dict[str, Any]:
+    try:
+        await jobs_service.update_job(job_id, "running", 5, "starting ingest")
+
+        local_dir = self._local_dir(user_id, dataset_id)
+        parquet_local = local_dir / "data.parquet"
+
+        suffix = raw_local.suffix.lower()
+        if suffix == ".csv":
+            await jobs_service.update_job(job_id, "running", 15, "csv → parquet")
+            csv_to_parquet_streaming(raw_local, parquet_local)
+        elif suffix in [".xlsx", ".xls"]:
+            await jobs_service.update_job(job_id, "running", 15, "excel → parquet")
+            xlsx_to_parquet(raw_local, parquet_local)
+        elif suffix == ".parquet":
+            await jobs_service.update_job(job_id, "running", 15, "copy parquet")
+            parquet_copy(raw_local, parquet_local)
+        else:
+            raise ValueError(f"Unsupported file type: {suffix}")
+
+        await jobs_service.update_job(job_id, "running", 55, "uploading parquet")
+
+        paths = self._paths(user_id, dataset_id)
+        parquet_ref = paths["parquet"]
+
+        await self.storage.upload_file(
+            parquet_local,
+            parquet_ref,
+            "application/octet-stream",
+        )
+
+        await jobs_service.update_job(job_id, "running", 70, "profiling")
+
+        eng = DuckDBEngine(user_id)
+        con = eng.connect()
         try:
-            await jobs_service.update_job(job_id, "running", 5, "starting ingest")
+            base_view, detected_issues = eng.register_parquet_with_issues(con, dataset_id, parquet_local)
+            profile = build_profile_from_duckdb(con, base_view)
 
-            local_dir = self._local_dir(user_id, dataset_id)
-            parquet_local = local_dir / "data.parquet"
+            profile.setdefault("issues", [])
+            profile["issues"].extend(detected_issues)
 
-            suffix = raw_local.suffix.lower()
-            if suffix == ".csv":
-                await jobs_service.update_job(job_id, "running", 15, "csv → parquet")
-                csv_to_parquet_streaming(raw_local, parquet_local)
-            elif suffix in [".xlsx", ".xls"]:
-                await jobs_service.update_job(job_id, "running", 15, "excel → parquet")
-                xlsx_to_parquet(raw_local, parquet_local)
-            elif suffix == ".parquet":
-                await jobs_service.update_job(job_id, "running", 15, "copy parquet")
-                parquet_copy(raw_local, parquet_local)
-            else:
-                raise ValueError(f"Unsupported file type: {suffix}")
+        finally:
+            con.close()
 
-            await jobs_service.update_job(job_id, "running", 55, "uploading parquet")
+        await jobs_service.update_job(job_id, "running", 90, "saving metadata")
 
-            paths = self._paths(user_id, dataset_id)
-            parquet_ref = paths["parquet"]
+        # -----------------------------------------------------------------
+        # Snapshot metadata (REQUIRED by stats_service)
+        # -----------------------------------------------------------------
+        parquet_sha = fingerprint_file(parquet_local)
 
-            await self.storage.upload_file(
-                parquet_local,
-                parquet_ref,
-                "application/octet-stream",
-            )
+        profile["parquet_ref"] = parquet_ref
+        profile["parquet_sha"] = parquet_sha
+        profile["pipeline_hash"] = "__none__"
+        profile["engine_version"] = ENGINE_VERSION
 
-            await jobs_service.update_job(job_id, "running", 70, "profiling")
+        profile.setdefault("numeric_summary", {})
 
-            eng = DuckDBEngine(user_id)
-            con = eng.connect()
+        schema_payload = json.dumps(profile.get("schema") or [])
+        profile_payload = json.dumps(profile)
+
+        result = await registry.execute(
+            """
+            UPDATE datasets
+            SET parquet_ref = $2,
+                n_rows = $3,
+                n_cols = $4,
+                schema_json = $5::jsonb,
+                profile_json = $6::jsonb,
+                state = 'ready',
+                error_message = NULL,
+                updated_at = NOW()
+            WHERE dataset_id = $1::uuid
+            """,
+            dataset_id,
+            parquet_ref,
+            int(profile.get("n_rows") or 0),
+            int(profile.get("n_cols") or 0),
+            schema_payload,
+            profile_payload,
+        )
+
+        if not str(result).endswith("1"):
+            raise RuntimeError(f"Dataset update failed: {result}")
+
+        await jobs_service.update_job(
+            job_id,
+            "done",
+            100,
+            "complete",
+            {"profile": profile},
+        )
+
+        return profile
+
+    except Exception as e:
+        # ✅ Do NOT fail dataset for fixable unsupported-type errors
+        msg = f"{type(e).__name__}: {e}"
+        msg_u = msg.upper()
+
+        is_fixable_unsupported = (
+            isinstance(e, DuckDBUnsupportedTypeError)
+            or "TIME WITH TIME ZONE" in msg_u
+            or "UNSUPPORTED TYPE" in msg_u
+        )
+
+        if is_fixable_unsupported:
+            issues: list[dict[str, Any]] = []
+
+            # Try to identify exact column(s) using Parquet metadata (no DuckDB read required)
             try:
-                base_view, detected_issues = eng.register_parquet_with_issues(con, dataset_id, parquet_local)
-                profile = build_profile_from_duckdb(con, base_view)
+                import pyarrow.parquet as pq
 
-                profile.setdefault("issues", [])
-                profile["issues"].extend(detected_issues)
+                schema = pq.ParquetFile(str(parquet_local)).schema_arrow
+                for f in schema:
+                    t = str(f.type).lower()
 
-            finally:
-                con.close()
+                    # Catch common offenders: timestamp with tz, time32/time64, etc.
+                    if ("timestamp" in t and ("tz=" in t or "timezone" in t)) or t.startswith("time"):
+                        issues.append(
+                            {
+                                "column": f.name,
+                                "issue_type": "unsupported_type",
+                                "severity": "blocking",
+                                "details": {"parquet_type": t, "message": msg},
+                                "suggested_fix": {"op": "change_type", "to": "varchar"},
+                            }
+                        )
+            except Exception:
+                pass
 
-            await jobs_service.update_job(job_id, "running", 90, "saving metadata")
+            # If still unknown, mark as manual-only (prevents broken Apply workflow)
+            if not issues:
+                issues = [
+                    {
+                        "column": "__unknown__",
+                        "issue_type": "unsupported_type_unknown",
+                        "severity": "blocking",
+                        "details": {"message": msg},
+                        "suggested_fix": {"op": "manual_fix_required"},
+                    }
+                ]
 
-            # -----------------------------------------------------------------
-            # Snapshot metadata (REQUIRED by stats_service)
-            # -----------------------------------------------------------------
+            # Keep required snapshot metadata keys present even in safe_profile
             parquet_sha = fingerprint_file(parquet_local)
 
-            profile["parquet_ref"] = parquet_ref
-            profile["parquet_sha"] = parquet_sha
-            profile["pipeline_hash"] = "__none__"
-            profile["engine_version"] = ENGINE_VERSION
+            safe_profile = {
+                "n_rows": 0,
+                "n_cols": 0,
+                "schema": [],
+                "sample_rows": [],
+                "issues": issues,
+                "parquet_ref": parquet_ref,
+                "parquet_sha": parquet_sha,
+                "pipeline_hash": "__none__",
+                "engine_version": ENGINE_VERSION,
+                "numeric_summary": {},
+            }
 
-            profile.setdefault("numeric_summary", {})
-
-            schema_payload = json.dumps(profile.get("schema") or [])
-            profile_payload = json.dumps(profile)
-
-            result = await registry.execute(
+            await registry.execute(
                 """
                 UPDATE datasets
-                SET parquet_ref = $2,
-                    n_rows = $3,
-                    n_cols = $4,
-                    schema_json = $5::jsonb,
-                    profile_json = $6::jsonb,
-                    state = 'ready',
+                SET state = 'ready',
                     error_message = NULL,
+                    profile_json = $2::jsonb,
+                    schema_json = $3::jsonb,
                     updated_at = NOW()
                 WHERE dataset_id = $1::uuid
                 """,
                 dataset_id,
-                parquet_ref,
-                int(profile.get("n_rows") or 0),
-                int(profile.get("n_cols") or 0),
-                schema_payload,
-                profile_payload,
+                json.dumps(safe_profile),
+                json.dumps([]),
             )
-
-            if not str(result).endswith("1"):
-                raise RuntimeError(f"Dataset update failed: {result}")
 
             await jobs_service.update_job(
                 job_id,
                 "done",
                 100,
                 "complete",
-                {"profile": profile},
+                {
+                    "warning": "Dataset requires formatting fixes",
+                    "error": msg,
+                },
             )
 
-            return profile
+            return safe_profile
 
-        except Exception as e:
-            # ✅ Fix #2: Do NOT fail dataset for fixable unsupported-type errors
-            msg = f"{type(e).__name__}: {e}"
-
-            is_fixable_unsupported = (
-                isinstance(e, DuckDBUnsupportedTypeError)
-                or "TIME WITH TIME ZONE" in msg
-                or "Unsupported type" in msg
+        # ❌ Real error → dataset truly failed
+        try:
+            await registry.execute(
+                """
+                UPDATE datasets
+                SET state = 'failed',
+                    error_message = $2,
+                    updated_at = NOW()
+                WHERE dataset_id = $1::uuid
+                """,
+                dataset_id,
+                msg,
             )
+        except Exception:
+            pass
 
-            if is_fixable_unsupported:
-                issues = [
-                    {
-                        "column": "__unknown__",
-                        "issue_type": "unsupported_type",
-                        "severity": "blocking",
-                        "details": {"message": msg},
-                        "suggested_fix": {"op": "change_type", "to": "varchar"},
-                    }
-                ]
+        raise
 
-                safe_profile = {
-                    "n_rows": 0,
-                    "n_cols": 0,
-                    "schema": [],
-                    "sample_rows": [],
-                    "issues": issues,
-                    "engine_version": ENGINE_VERSION,
-                }
+   async def apply_transforms_and_version(
+    self,
+    user_id: str,
+    dataset_id: str,
+    transforms: list[PipelineStep],
+) -> Dict[str, Any]:
+    # 1) Read current dataset info + ownership
+    row = await registry.fetchrow(
+        """
+        SELECT dataset_id, user_id, parquet_ref, version, state
+        FROM datasets
+        WHERE dataset_id = $1::uuid AND user_id::text = $2
+        """,
+        dataset_id,
+        user_id,
+    )
+    if not row:
+        raise FileNotFoundError("Dataset not found")
+    if (row.get("state") or "ready") != "ready":
+        raise ValueError("Dataset is not ready yet")
 
-                await registry.execute(
-                    """
-                    UPDATE datasets
-                    SET state = 'ready',
-                        error_message = NULL,
-                        profile_json = $2::jsonb,
-                        schema_json = $3::jsonb,
-                        updated_at = NOW()
-                    WHERE dataset_id = $1::uuid
-                    """,
-                    dataset_id,
-                    json.dumps(safe_profile),
-                    json.dumps([]),
-                )
+    current_version = int(row.get("version") or 1)
+    new_version = current_version + 1
 
-                await jobs_service.update_job(
-                    job_id,
-                    "done",
-                    100,
-                    "complete",
-                    {
-                        "warning": "Dataset requires formatting fixes",
-                        "error": msg,
-                    },
-                )
+    # 2) Mark dataset as processing
+    #
+    # Recommended: make this conditional to avoid two transform requests racing each other.
+    # If your registry.execute doesn't return an affected-row count, keep your original query.
+    await registry.execute(
+        """
+        UPDATE datasets
+        SET state = 'processing',
+            error_message = NULL,
+            updated_at = NOW()
+        WHERE dataset_id = $1::uuid
+          AND state = 'ready'
+        """,
+        dataset_id,
+    )
 
-                return safe_profile
-
-            # ❌ Real error → dataset truly failed
-            try:
-                await registry.execute(
-                    """
-                    UPDATE datasets
-                    SET state = 'failed',
-                        error_message = $2,
-                        updated_at = NOW()
-                    WHERE dataset_id = $1::uuid
-                    """,
-                    dataset_id,
-                    msg,
-                )
-            except Exception:
-                pass
-
-            raise
-
-
-    async def apply_transforms_and_version(
-        self,
-        user_id: str,
-        dataset_id: str,
-        transforms: list[PipelineStep],
-    ) -> Dict[str, Any]:
-        # 1) Read current dataset info + ownership
-        row = await registry.fetchrow(
-            """
-            SELECT dataset_id, user_id, parquet_ref, version, state
-            FROM datasets
-            WHERE dataset_id = $1::uuid AND user_id::text = $2
-            """,
-            dataset_id,
-            user_id,
-        )
-        if not row:
-            raise FileNotFoundError("Dataset not found")
-        if (row.get("state") or "ready") != "ready":
-            raise ValueError("Dataset is not ready yet")
-
-        current_version = int(row.get("version") or 1)
-        new_version = current_version + 1
-
-        # 2) Mark dataset as processing
-        await registry.execute(
-            """
-            UPDATE datasets
-            SET state = 'processing',
-                updated_at = NOW()
-            WHERE dataset_id = $1::uuid
-            """,
-            dataset_id,
-        )
-
+    try:
         # 3) Ensure parquet exists locally
         parquet_local = await self._ensure_parquet_local(user_id, dataset_id)
 
@@ -375,21 +414,23 @@ class DatasetService:
         eng = DuckDBEngine(user_id)
         con = eng.connect()
         try:
+            # register_parquet returns just the view name (string)
             base_view = eng.register_parquet(con, dataset_id, parquet_local)
-
 
             # Apply transforms as a pipeline view
             piped_view = ensure_pipeline_view(con, dataset_id, base_view, transforms)
 
-            # Materialize full dataset
-            con.execute(f"COPY (SELECT * FROM {piped_view}) TO '{out_local.as_posix()}' (FORMAT PARQUET)")
+            # Materialize full dataset (escape quotes in path for safety)
+            out_p = out_local.as_posix().replace("'", "''")
+            con.execute(
+                f"COPY (SELECT * FROM {piped_view}) TO '{out_p}' (FORMAT PARQUET)"
+            )
         finally:
             con.close()
 
         # 5) Upload new parquet to a versioned storage location
         base = f"{user_id}/datasets/{dataset_id}"
         new_parquet_ref = f"{base}/parquet/v{new_version}/data.parquet"
-
         await self.storage.upload_file(out_local, new_parquet_ref, "application/octet-stream")
 
         # 6) Re-profile the new parquet
@@ -401,7 +442,6 @@ class DatasetService:
 
             profile.setdefault("issues", [])
             profile["issues"].extend(detected_issues)
-
         finally:
             con.close()
 
@@ -449,6 +489,25 @@ class DatasetService:
             "profile": profile,
         }
 
+    except Exception as e:
+        # CRITICAL: never leave dataset stuck in "processing"
+        msg = f"{type(e).__name__}: {e}"
+        try:
+            await registry.execute(
+                """
+                UPDATE datasets
+                SET state = 'ready',
+                    error_message = $2,
+                    updated_at = NOW()
+                WHERE dataset_id = $1::uuid
+                """,
+                dataset_id,
+                msg,
+            )
+        except Exception:
+            pass
+        raise
+ 
 
 # Singleton
 dataset_service = DatasetService()
