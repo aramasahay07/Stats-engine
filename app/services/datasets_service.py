@@ -362,153 +362,148 @@ async def build_parquet_and_profile(
             pass
 
         raise
+    async def apply_transforms_and_version(
+        self,
+        user_id: str,
+        dataset_id: str,
+        transforms: list[PipelineStep],
+    ) -> Dict[str, Any]:
+        # 1) Read current dataset info + ownership
+        row = await registry.fetchrow(
+            """
+            SELECT dataset_id, user_id, parquet_ref, version, state
+            FROM datasets
+            WHERE dataset_id = $1::uuid AND user_id::text = $2
+            """,
+            dataset_id,
+            user_id,
+        )
+        if not row:
+            raise FileNotFoundError("Dataset not found")
+        if (row.get("state") or "ready") != "ready":
+            raise ValueError("Dataset is not ready yet")
 
-   async def apply_transforms_and_version(
-    self,
-    user_id: str,
-    dataset_id: str,
-    transforms: list[PipelineStep],
-) -> Dict[str, Any]:
-    # 1) Read current dataset info + ownership
-    row = await registry.fetchrow(
-        """
-        SELECT dataset_id, user_id, parquet_ref, version, state
-        FROM datasets
-        WHERE dataset_id = $1::uuid AND user_id::text = $2
-        """,
-        dataset_id,
-        user_id,
-    )
-    if not row:
-        raise FileNotFoundError("Dataset not found")
-    if (row.get("state") or "ready") != "ready":
-        raise ValueError("Dataset is not ready yet")
+        current_version = int(row.get("version") or 1)
+        new_version = current_version + 1
 
-    current_version = int(row.get("version") or 1)
-    new_version = current_version + 1
-
-    # 2) Mark dataset as processing
-    #
-    # Recommended: make this conditional to avoid two transform requests racing each other.
-    # If your registry.execute doesn't return an affected-row count, keep your original query.
-    await registry.execute(
-        """
-        UPDATE datasets
-        SET state = 'processing',
-            error_message = NULL,
-            updated_at = NOW()
-        WHERE dataset_id = $1::uuid
-          AND state = 'ready'
-        """,
-        dataset_id,
-    )
-
-    try:
-        # 3) Ensure parquet exists locally
-        parquet_local = await self._ensure_parquet_local(user_id, dataset_id)
-
-        # 4) Run transforms in DuckDB and materialize to a NEW parquet
-        local_dir = self._local_dir(user_id, dataset_id)
-        out_local = local_dir / f"data_v{new_version}.parquet"
-
-        eng = DuckDBEngine(user_id)
-        con = eng.connect()
-        try:
-            # register_parquet returns just the view name (string)
-            base_view = eng.register_parquet(con, dataset_id, parquet_local)
-
-            # Apply transforms as a pipeline view
-            piped_view = ensure_pipeline_view(con, dataset_id, base_view, transforms)
-
-            # Materialize full dataset (escape quotes in path for safety)
-            out_p = out_local.as_posix().replace("'", "''")
-            con.execute(
-                f"COPY (SELECT * FROM {piped_view}) TO '{out_p}' (FORMAT PARQUET)"
-            )
-        finally:
-            con.close()
-
-        # 5) Upload new parquet to a versioned storage location
-        base = f"{user_id}/datasets/{dataset_id}"
-        new_parquet_ref = f"{base}/parquet/v{new_version}/data.parquet"
-        await self.storage.upload_file(out_local, new_parquet_ref, "application/octet-stream")
-
-        # 6) Re-profile the new parquet
-        eng = DuckDBEngine(user_id)
-        con = eng.connect()
-        try:
-            base_view, detected_issues = eng.register_parquet_with_issues(con, dataset_id, out_local)
-            profile = build_profile_from_duckdb(con, base_view)
-
-            profile.setdefault("issues", [])
-            profile["issues"].extend(detected_issues)
-        finally:
-            con.close()
-
-        # 7) Snapshot metadata updates
-        parquet_sha = fingerprint_file(out_local)
-        ph = pipeline_hash(transforms)
-
-        profile["parquet_ref"] = new_parquet_ref
-        profile["parquet_sha"] = parquet_sha
-        profile["pipeline_hash"] = ph
-        profile["engine_version"] = ENGINE_VERSION
-        profile.setdefault("numeric_summary", {})
-
-        schema_payload = json.dumps(profile.get("schema") or [])
-        profile_payload = json.dumps(profile)
-
-        # 8) Persist updated dataset state + bump version
+        # 2) Mark dataset as processing
         await registry.execute(
             """
             UPDATE datasets
-            SET parquet_ref = $2,
-                n_rows = $3,
-                n_cols = $4,
-                schema_json = $5::jsonb,
-                profile_json = $6::jsonb,
-                version = $7,
-                state = 'ready',
+            SET state = 'processing',
                 error_message = NULL,
                 updated_at = NOW()
             WHERE dataset_id = $1::uuid
+              AND state = 'ready'
             """,
             dataset_id,
-            new_parquet_ref,
-            int(profile.get("n_rows") or 0),
-            int(profile.get("n_cols") or 0),
-            schema_payload,
-            profile_payload,
-            new_version,
         )
 
-        return {
-            "dataset_id": dataset_id,
-            "version": new_version,
-            "parquet_ref": new_parquet_ref,
-            "profile": profile,
-        }
-
-    except Exception as e:
-        # CRITICAL: never leave dataset stuck in "processing"
-        msg = f"{type(e).__name__}: {e}"
         try:
+            # 3) Ensure parquet exists locally
+            parquet_local = await self._ensure_parquet_local(user_id, dataset_id)
+
+            # 4) Run transforms in DuckDB and materialize to a NEW parquet
+            local_dir = self._local_dir(user_id, dataset_id)
+            out_local = local_dir / f"data_v{new_version}.parquet"
+
+            eng = DuckDBEngine(user_id)
+            con = eng.connect()
+            try:
+                # register_parquet returns just the view name (string)
+                base_view = eng.register_parquet(con, dataset_id, parquet_local)
+
+                # Apply transforms as a pipeline view
+                piped_view = ensure_pipeline_view(con, dataset_id, base_view, transforms)
+
+                # Materialize full dataset (escape quotes in path for safety)
+                out_p = out_local.as_posix().replace("'", "''")
+                con.execute(
+                    f"COPY (SELECT * FROM {piped_view}) TO '{out_p}' (FORMAT PARQUET)"
+                )
+            finally:
+                con.close()
+
+            # 5) Upload new parquet to a versioned storage location
+            base = f"{user_id}/datasets/{dataset_id}"
+            new_parquet_ref = f"{base}/parquet/v{new_version}/data.parquet"
+            await self.storage.upload_file(out_local, new_parquet_ref, "application/octet-stream")
+
+            # 6) Re-profile the new parquet
+            eng = DuckDBEngine(user_id)
+            con = eng.connect()
+            try:
+                base_view, detected_issues = eng.register_parquet_with_issues(con, dataset_id, out_local)
+                profile = build_profile_from_duckdb(con, base_view)
+
+                profile.setdefault("issues", [])
+                profile["issues"].extend(detected_issues)
+            finally:
+                con.close()
+
+            # 7) Snapshot metadata updates
+            parquet_sha = fingerprint_file(out_local)
+            ph = pipeline_hash(transforms)
+
+            profile["parquet_ref"] = new_parquet_ref
+            profile["parquet_sha"] = parquet_sha
+            profile["pipeline_hash"] = ph
+            profile["engine_version"] = ENGINE_VERSION
+            profile.setdefault("numeric_summary", {})
+
+            schema_payload = json.dumps(profile.get("schema") or [])
+            profile_payload = json.dumps(profile)
+
+            # 8) Persist updated dataset state + bump version
             await registry.execute(
                 """
                 UPDATE datasets
-                SET state = 'ready',
-                    error_message = $2,
+                SET parquet_ref = $2,
+                    n_rows = $3,
+                    n_cols = $4,
+                    schema_json = $5::jsonb,
+                    profile_json = $6::jsonb,
+                    version = $7,
+                    state = 'ready',
+                    error_message = NULL,
                     updated_at = NOW()
                 WHERE dataset_id = $1::uuid
                 """,
                 dataset_id,
-                msg,
+                new_parquet_ref,
+                int(profile.get("n_rows") or 0),
+                int(profile.get("n_cols") or 0),
+                schema_payload,
+                profile_payload,
+                new_version,
             )
-        except Exception:
-            pass
-        raise
- 
+
+            return {
+                "dataset_id": dataset_id,
+                "version": new_version,
+                "parquet_ref": new_parquet_ref,
+                "profile": profile,
+            }
+
+        except Exception as e:
+            # CRITICAL: never leave dataset stuck in "processing"
+            msg = f"{type(e).__name__}: {e}"
+            try:
+                await registry.execute(
+                    """
+                    UPDATE datasets
+                    SET state = 'ready',
+                        error_message = $2,
+                        updated_at = NOW()
+                    WHERE dataset_id = $1::uuid
+                    """,
+                    dataset_id,
+                    msg,
+                )
+            except Exception:
+                pass
+            raise
+
 
 # Singleton
 dataset_service = DatasetService()
-   
