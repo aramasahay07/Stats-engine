@@ -12,7 +12,7 @@ from app.config import settings
 from app.services.storage_supabase import SupabaseStorage
 from app.services import jobs_service
 from app.engine.ingest import csv_to_parquet_streaming, xlsx_to_parquet, parquet_copy
-from app.engine.duckdb_engine import DuckDBEngine
+from app.engine.duckdb_engine import DuckDBEngine, DuckDBUnsupportedTypeError
 from app.engine.profiling import build_profile_from_duckdb
 from app.db import registry
 from app.engine.pipeline import ensure_pipeline_view, pipeline_hash
@@ -210,7 +210,6 @@ class DatasetService:
             profile["pipeline_hash"] = "__none__"
             profile["engine_version"] = ENGINE_VERSION
 
-            # Ensure numeric_summary exists
             profile.setdefault("numeric_summary", {})
 
             schema_payload = json.dumps(profile.get("schema") or [])
@@ -249,8 +248,66 @@ class DatasetService:
             )
 
             return profile
+
         except Exception as e:
-    # Mark dataset as failed (best-effort; don't mask original error)
+            # ✅ Fix #2: Do NOT fail dataset for fixable unsupported-type errors
+            msg = f"{type(e).__name__}: {e}"
+
+            is_fixable_unsupported = (
+                isinstance(e, DuckDBUnsupportedTypeError)
+                or "TIME WITH TIME ZONE" in msg
+                or "Unsupported type" in msg
+            )
+
+            if is_fixable_unsupported:
+                issues = [
+                    {
+                        "column": "__unknown__",
+                        "issue_type": "unsupported_type",
+                        "severity": "blocking",
+                        "details": {"message": msg},
+                        "suggested_fix": {"op": "change_type", "to": "varchar"},
+                    }
+                ]
+
+                safe_profile = {
+                    "n_rows": 0,
+                    "n_cols": 0,
+                    "schema": [],
+                    "sample_rows": [],
+                    "issues": issues,
+                    "engine_version": ENGINE_VERSION,
+                }
+
+                await registry.execute(
+                    """
+                    UPDATE datasets
+                    SET state = 'ready',
+                        error_message = NULL,
+                        profile_json = $2::jsonb,
+                        schema_json = $3::jsonb,
+                        updated_at = NOW()
+                    WHERE dataset_id = $1::uuid
+                    """,
+                    dataset_id,
+                    json.dumps(safe_profile),
+                    json.dumps([]),
+                )
+
+                await jobs_service.update_job(
+                    job_id,
+                    "done",
+                    100,
+                    "complete",
+                    {
+                        "warning": "Dataset requires formatting fixes",
+                        "error": msg,
+                    },
+                )
+
+                return safe_profile
+
+            # ❌ Real error → dataset truly failed
             try:
                 await registry.execute(
                     """
@@ -261,12 +318,14 @@ class DatasetService:
                     WHERE dataset_id = $1::uuid
                     """,
                     dataset_id,
-                    f"{type(e).__name__}: {e}",
+                    msg,
                 )
             except Exception:
                 pass
 
             raise
+
+
     async def apply_transforms_and_version(
         self,
         user_id: str,
