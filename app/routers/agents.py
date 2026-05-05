@@ -8,10 +8,13 @@ from pydantic import BaseModel, Field
 
 from app.agents.ai_analyst_agent import AIAnalystAgent
 from app.agents.data_prep_agent import DataPrepAgent
+from app.agents.improvement_agent import ImprovementGuidanceAgent
 from app.agents.models import (
     ChartRequest,
     ChartSpec,
     DataPrepIssue,
+    ImprovementPlanResponse,
+    ImprovementRequest,
     StatsRequest,
     StatsResult,
     TransformPlan,
@@ -185,6 +188,23 @@ async def analyze_dataset(
     agent = AIAnalystAgent()
     # AIAnalystAgent selects analysis if request.analysis is None
     return await agent.run(user_id=user_id, dataset_id=ctx["dataset_id"], request=request)
+
+
+@router.post("/{dataset_id}/improvement-plan", response_model=ImprovementPlanResponse)
+async def improvement_plan(
+    dataset_id: str,
+    request: ImprovementRequest,
+    user_id: str = Query(...),
+) -> ImprovementPlanResponse:
+    ctx = await validate_dataset_ready(dataset_id, user_id)
+
+    agent = ImprovementGuidanceAgent()
+    return await agent.run(
+        user_id=user_id,
+        dataset_id=ctx["dataset_id"],
+        request=request,
+        profile=ctx.get("profile") or {},
+    )
 
 
 @router.post("/chart-spec", response_model=ChartSpec)

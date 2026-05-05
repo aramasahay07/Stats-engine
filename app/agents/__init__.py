@@ -1,9 +1,12 @@
 from app.agents.ai_analyst_agent import AIAnalystAgent
 from app.agents.data_prep_agent import DataPrepAgent
+from app.agents.improvement_agent import ImprovementGuidanceAgent
 from app.agents.models import (
     ChartRequest,
     ChartSpec,
     DataPrepIssue,
+    ImprovementPlanResponse,
+    ImprovementRequest,
     Severity,
     StatsRequest,
     StatsResult,
@@ -22,6 +25,9 @@ __all__ = [
     "ChartSpec",
     "DataPrepAgent",
     "DataPrepIssue",
+    "ImprovementGuidanceAgent",
+    "ImprovementPlanResponse",
+    "ImprovementRequest",
     "QAAgent",
     "Severity",
     "StatsRequest",
