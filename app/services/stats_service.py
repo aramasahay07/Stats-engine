@@ -1272,10 +1272,16 @@ async def run_stats(
     # Use the mapped legacy analysis name for legacy cache keys; use the requested slug for concepts.
     analysis_for_hash = analysis_requested if concept_mod is not None else analysis_mapped
 
+    params_for_hash = dict(params)
+    if where and str(where).strip():
+        params_for_hash["__where"] = str(where).strip()
+    if pipeline_id:
+        params_for_hash["__pipeline_id"] = str(pipeline_id)
+
     h = _hash_spec(
         dataset_id=dataset_id,
         analysis=analysis_for_hash,
-        params=params,
+        params=params_for_hash,
         parquet_ref=profile.get("parquet_ref"),
         parquet_sha=profile.get("parquet_sha"),
         pipeline_hash=profile.get("pipeline_hash", "__none__"),
@@ -1323,7 +1329,7 @@ async def run_stats(
                     """
                     SELECT steps_json
                     FROM pipelines
-                    WHERE pipeline_id = $1::uuid
+                    WHERE id = $1::uuid
                       AND user_id = $2
                       AND dataset_id = $3::uuid
                     """,
