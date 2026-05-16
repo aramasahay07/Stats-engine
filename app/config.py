@@ -1,8 +1,9 @@
+import json
 import os
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -51,7 +52,31 @@ class Settings(BaseSettings):
     # If Railway env sets CORS_ALLOW_ORIGINS as a comma-separated string,
     # Pydantic can parse list formats; simplest is to keep ["*"] by default.
     # -------------------------
-    cors_allow_origins: List[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
+    cors_allow_origins: Annotated[List[str], NoDecode] = Field(
+        default_factory=lambda: ["*"],
+        alias="CORS_ALLOW_ORIGINS",
+    )
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def _parse_cors_allow_origins(cls, value):
+        if value is None or value == "":
+            return ["*"]
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return ["*"]
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except Exception:
+                    pass
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return value
 
     def model_post_init(self, __context) -> None:
         """
