@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List
 
 from app.models.process_mining import ColumnMapping, ProcessDataShape
-from app.services.process_mining.common import ensure_unique, qident, qstring
+from app.services.process_mining.common import ensure_unique, humanize_activity, qident, qstring
 
 
 def _resource_expr(column: str | None) -> str:
@@ -39,7 +39,7 @@ def build_canonical_event_log_view(
                 f"""
                 SELECT
                     CAST({qident(case_id_column)} AS VARCHAR) AS case_id,
-                    {qstring(pivot_column)} AS activity,
+                    {qstring(humanize_activity(pivot_column))} AS activity,
                     TRY_CAST({qident(pivot_column)} AS TIMESTAMP) AS event_ts,
                     {_resource_expr(mapping.resource_column)},
                     {_cost_expr(mapping.cost_column)}

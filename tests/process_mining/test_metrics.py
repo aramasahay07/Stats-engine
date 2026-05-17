@@ -5,12 +5,14 @@ import pytest
 from app.models.process_mining import ColumnMapping, ProcessDataShape
 from app.services.process_mining.metrics import (
     build_edge_duration_map,
+    compute_case_records,
     compute_bottlenecks,
     compute_process_map_edges,
     compute_process_map_nodes,
     compute_rework_loops,
     compute_summary,
     compute_variants,
+    create_case_summary_view,
     create_direct_follows_view,
 )
 from app.services.process_mining.shaper import build_canonical_event_log_view
@@ -33,13 +35,15 @@ def test_core_metrics_are_computed_from_long_event_log(duckdb_con, long_event_lo
     event_log_view = build_canonical_event_log_view(duckdb_con, "base_view", mapping, shape)
     validate_canonical_event_log(duckdb_con, event_log_view)
     direct_follows_view = create_direct_follows_view(duckdb_con, event_log_view)
+    case_summary_view = create_case_summary_view(duckdb_con, event_log_view, mapping.attribute_columns, None)
 
-    summary = compute_summary(duckdb_con, event_log_view)
-    nodes = compute_process_map_nodes(duckdb_con, event_log_view, direct_follows_view)
+    summary = compute_summary(duckdb_con, case_summary_view)
+    nodes = compute_process_map_nodes(duckdb_con, direct_follows_view)
     edges = compute_process_map_edges(duckdb_con, direct_follows_view)
-    variants = compute_variants(duckdb_con, event_log_view)
+    variants = compute_variants(duckdb_con, case_summary_view)
+    cases = compute_case_records(duckdb_con, case_summary_view, variants)
     bottlenecks = compute_bottlenecks(duckdb_con, direct_follows_view)
-    rework_loops = compute_rework_loops(duckdb_con, event_log_view)
+    rework_loops = compute_rework_loops(duckdb_con)
     edge_map = build_edge_duration_map(edges)
 
     assert summary.total_cases == 3
@@ -47,14 +51,15 @@ def test_core_metrics_are_computed_from_long_event_log(duckdb_con, long_event_lo
     assert summary.unique_activities == 4
     assert summary.variant_count == 3
     assert summary.rework_rate == pytest.approx(1 / 3)
-    assert summary.avg_cycle_time_hours == pytest.approx(13 / 3)
-    assert summary.median_cycle_time_hours == pytest.approx(3.0)
+    assert summary.average_cycle_time == pytest.approx(13 / 3)
+    assert summary.median_cycle_time == pytest.approx(3.0)
 
-    assert nodes[0].activity == "A"
-    assert any(edge.from_activity == "A" and edge.to_activity == "B" and edge.frequency == 2 for edge in edges)
-    assert any(variant.activities == ["A", "B", "C"] for variant in variants)
+    assert nodes[0].id == "A"
+    assert any(edge.source == "A" and edge.target == "B" and edge.frequency == 2 for edge in edges)
+    assert any(variant.path == ["A", "B", "C"] for variant in variants)
+    assert cases[0].variant_id >= 1
     assert bottlenecks[0].from_activity == "A"
     assert bottlenecks[0].to_activity == "B"
     assert rework_loops[0].activity == "B"
     assert rework_loops[0].affected_cases == 1
-    assert edge_map["A->B"]["avg"] == pytest.approx(3.0)
+    assert edge_map["A||B"].avg == pytest.approx(3.0)

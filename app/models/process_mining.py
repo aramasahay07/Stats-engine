@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ColumnMapping(BaseModel):
@@ -15,9 +15,11 @@ class ColumnMapping(BaseModel):
 
 
 class ProcessDataShape(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     format: Literal["long", "wide"] = "long"
-    case_id_column: Optional[str] = None
-    pivot_columns: List[str] = Field(default_factory=list)
+    case_id_column: Optional[str] = Field(default=None, alias="caseIdColumn")
+    pivot_columns: List[str] = Field(default_factory=list, alias="pivotColumns")
 
 
 class ProcessGoals(BaseModel):
@@ -26,6 +28,7 @@ class ProcessGoals(BaseModel):
     ] = None
     target_improvement_pct: Optional[float] = None
     protected_activities: List[str] = Field(default_factory=list)
+    notes: str = ""
     sla_hours: Optional[float] = None
 
 
@@ -35,83 +38,194 @@ class CostInputs(BaseModel):
 
 
 class AnalyzeProcessRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    dataset_id: str
     mapping: ColumnMapping
     shape: ProcessDataShape = Field(default_factory=ProcessDataShape)
+    schema_names: List[str] = Field(default_factory=list)
     goals: Optional[ProcessGoals] = None
     cost_inputs: Optional[CostInputs] = None
     expected_path: Optional[List[str]] = None
 
 
-class ProcessSummary(BaseModel):
-    total_cases: int = 0
-    total_events: int = 0
-    unique_activities: int = 0
-    avg_cycle_time_hours: Optional[float] = None
-    median_cycle_time_hours: Optional[float] = None
-    rework_rate: Optional[float] = None
-    variant_count: int = 0
+class ProcessMiningSummary(BaseModel):
+    total_cases: int
+    total_events: int
+    unique_activities: int
+    average_cycle_time: float
+    median_cycle_time: float
+    rework_rate: float
+    variant_count: int
     sla_breach_rate: Optional[float] = None
 
 
-class ProcessMapNode(BaseModel):
-    activity: str
+class ProcessNode(BaseModel):
+    id: str
+    label: str
     frequency: int
-    case_frequency: int
-    avg_duration_in_state_hours: Optional[float] = None
+    avg_duration: float
 
 
-class ProcessMapEdge(BaseModel):
-    from_activity: str
-    to_activity: str
+class ProcessEdge(BaseModel):
+    source: str
+    target: str
     frequency: int
-    case_frequency: int
-    avg_wait_hours: Optional[float] = None
-    median_wait_hours: Optional[float] = None
-    p90_wait_hours: Optional[float] = None
+    avg_duration: float
+    median_duration: float
+
+
+class ProcessMap(BaseModel):
+    nodes: List[ProcessNode]
+    edges: List[ProcessEdge]
 
 
 class ProcessVariant(BaseModel):
-    activities: List[str] = Field(default_factory=list)
+    variant_id: int
+    path: List[str]
     case_count: int
     percentage: float
-    avg_cycle_time_hours: Optional[float] = None
+    average_cycle_time: float
 
 
-class Bottleneck(BaseModel):
+class ProcessBottleneck(BaseModel):
     from_activity: str
     to_activity: str
-    frequency: int
-    avg_wait_hours: Optional[float] = None
-    median_wait_hours: Optional[float] = None
-    p90_wait_hours: Optional[float] = None
+    average_wait_time: float
+    median_wait_time: float
+    p90_wait_time: float
+    case_count: int
 
 
 class ReworkLoop(BaseModel):
     activity: str
+    repeat_count: int
     affected_cases: int
-    affected_case_pct: float
-    repeat_events: int
+    percentage_of_cases: float
 
 
-class AIInsights(BaseModel):
-    executive_summary: str = ""
-    key_findings: List[str] = Field(default_factory=list)
-    recommended_actions: List[str] = Field(default_factory=list)
+class ProcessAIInsights(BaseModel):
+    executive_summary: str
+    key_findings: List[str]
+    recommended_actions: List[str]
+
+
+class ProcessEdgeDuration(BaseModel):
+    avg: float
+    median: float
+
+
+class CaseRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    case_id: str
+    payer: str = ""
+    department: str = ""
+    variant_id: int
+    path: List[str]
+    cycle_time: float
+    has_rework: bool
+    sla_breached: bool
+    denial_reason: Optional[str] = None
+    amount: float = 0.0
+    start_iso: str
+
+
+class ConformanceViolation(BaseModel):
+    type: Literal["skipped", "extra", "out_of_order"]
+    activity: str
+    case_count: int
+    share: float
+
+
+class ConformanceResult(BaseModel):
+    expected_path: List[str]
+    fitness: float
+    perfect_share: float
+    cases_compliant: int
+    cases_total: int
+    violations: List[ConformanceViolation]
+
+
+class RootCauseFinding(BaseModel):
+    attribute: str
+    category: str
+    outcome: Literal["rework", "sla_breach"]
+    rate: float
+    baseline: float
+    lift: float
+    case_count: int
+
+
+class InitiativeEdge(BaseModel):
+    source: str
+    target: str
+
+
+class Initiative(BaseModel):
+    id: str
+    title: str
+    edge: InitiativeEdge
+    action: Literal["compress", "parallelize", "remove", "standardize"]
+    hours_saved_per_case: float
+    cases_affected: int
+    total_hours_saved: float
+    cost_savings: Optional[float] = None
+    effort: Literal["Low", "Medium", "High"]
+    rationale: str
+
+
+class ProjectedImpact(BaseModel):
+    cycle_time_reduction_pct: float
+    rework_reduction_pct: float
+    throughput_uplift_pct: float
+
+
+class TargetState(BaseModel):
+    nodes: List[ProcessNode] = Field(default_factory=list)
+    edges: List[ProcessEdge] = Field(default_factory=list)
+    node_annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    edge_annotations: List[Dict[str, Any]] = Field(default_factory=list)
+    removed_nodes: List[str] = Field(default_factory=list)
+    added_edges: List[Dict[str, Any]] = Field(default_factory=list)
+    projected_summary: ProcessMiningSummary
+    projected_impact: ProjectedImpact
+    assumptions: List[str] = Field(default_factory=list)
+
+
+class TocStep(BaseModel):
+    step: int
+    name: Literal["Identify", "Exploit", "Subordinate", "Elevate", "Repeat"]
+    description: str
+
+
+class TocConstraintEdge(BaseModel):
+    source: str
+    target: str
+
+
+class TocAnalysis(BaseModel):
+    constraint_edge: TocConstraintEdge
+    constraint_rationale: str
+    steps: List[TocStep]
+    projected_throughput_impact_pct: float
+    next_constraint: Optional[str] = None
 
 
 class ProcessMiningResult(BaseModel):
-    summary: ProcessSummary = Field(default_factory=ProcessSummary)
-    process_map: Dict[str, Any] = Field(default_factory=lambda: {"nodes": [], "edges": []})
-    variants: List[ProcessVariant] = Field(default_factory=list)
-    bottlenecks: List[Bottleneck] = Field(default_factory=list)
-    rework_loops: List[ReworkLoop] = Field(default_factory=list)
-    ai_insights: AIInsights = Field(default_factory=AIInsights)
-    target_state: Dict[str, Any] = Field(default_factory=dict)
-    toc_analysis: Dict[str, Any] = Field(default_factory=dict)
-    conformance: Dict[str, Any] = Field(default_factory=dict)
-    root_causes: List[Dict[str, Any]] = Field(default_factory=list)
-    initiatives: List[Dict[str, Any]] = Field(default_factory=list)
-    edge_durations: Dict[str, Dict[str, Optional[float]]] = Field(default_factory=dict)
-    expected_path: List[str] = Field(default_factory=list)
+    summary: ProcessMiningSummary
+    process_map: ProcessMap
+    variants: List[ProcessVariant]
+    bottlenecks: List[ProcessBottleneck]
+    rework_loops: List[ReworkLoop]
+    ai_insights: ProcessAIInsights
     goals: Optional[ProcessGoals] = None
     cost_inputs: Optional[CostInputs] = None
+    target_state: Optional[TargetState] = None
+    toc_analysis: Optional[TocAnalysis] = None
+    cases: Optional[List[CaseRecord]] = None
+    conformance: Optional[ConformanceResult] = None
+    root_causes: Optional[List[RootCauseFinding]] = None
+    initiatives: Optional[List[Initiative]] = None
+    edge_durations: Optional[Dict[str, ProcessEdgeDuration]] = None
+    expected_path: Optional[List[str]] = None

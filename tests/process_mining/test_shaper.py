@@ -29,9 +29,9 @@ def test_wide_to_long_shaping_builds_expected_activities(duckdb_con, wide_event_
     ).fetchall()
 
     assert rows == [
-        ("c1", "admission_ts"),
-        ("c1", "review_ts"),
-        ("c1", "discharge_ts"),
-        ("c2", "admission_ts"),
-        ("c2", "discharge_ts"),
+        ("c1", "Admission Ts"),
+        ("c1", "Review Ts"),
+        ("c1", "Discharge Ts"),
+        ("c2", "Admission Ts"),
+        ("c2", "Discharge Ts"),
     ]

@@ -2,32 +2,37 @@ from __future__ import annotations
 
 from typing import List
 
-from app.models.process_mining import AIInsights, Bottleneck, ProcessSummary, ProcessVariant, ReworkLoop
+from app.models.process_mining import (
+    ProcessAIInsights,
+    ProcessBottleneck,
+    ProcessMiningSummary,
+    ProcessVariant,
+    ReworkLoop,
+)
 
 
 def build_ai_insights(
-    summary: ProcessSummary,
+    summary: ProcessMiningSummary,
     variants: List[ProcessVariant],
-    bottlenecks: List[Bottleneck],
+    bottlenecks: List[ProcessBottleneck],
     rework_loops: List[ReworkLoop],
-) -> AIInsights:
+) -> ProcessAIInsights:
     findings: list[str] = []
     actions: list[str] = []
 
-    if summary.avg_cycle_time_hours is not None:
+    if summary.total_cases > 0:
         findings.append(
-            f"Average case cycle time is {summary.avg_cycle_time_hours:.2f} hours across {summary.total_cases} cases."
+            f"Average cycle time is {summary.average_cycle_time:.1f} hours across {summary.total_cases} cases."
         )
     if bottlenecks:
         slowest = bottlenecks[0]
-        if slowest.avg_wait_hours is not None:
-            findings.append(
-                f"The slowest directly-follows step is {slowest.from_activity} to {slowest.to_activity} "
-                f"at {slowest.avg_wait_hours:.2f} hours on average."
-            )
-            actions.append(
-                f"Review the handoff from {slowest.from_activity} to {slowest.to_activity} first."
-            )
+        findings.append(
+            f"The slowest directly-follows step is {slowest.from_activity} to {slowest.to_activity} "
+            f"at {slowest.average_wait_time:.1f} hours on average."
+        )
+        actions.append(
+            f"Review the handoff from {slowest.from_activity} to {slowest.to_activity} first."
+        )
     if rework_loops:
         top_loop = rework_loops[0]
         findings.append(
@@ -48,7 +53,7 @@ def build_ai_insights(
         f"Process mining completed on {summary.total_events} events across {summary.total_cases} cases. "
         f"Found {summary.unique_activities} activities and {summary.variant_count} distinct variants."
     )
-    return AIInsights(
+    return ProcessAIInsights(
         executive_summary=summary_line,
         key_findings=findings,
         recommended_actions=actions,
